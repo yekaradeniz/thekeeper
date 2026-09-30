@@ -17,3 +17,7 @@ Then follow the Install section of [avgkeeper/README.md](avgkeeper/README.md). R
 ## Status
 
 This build carries no AI Builder Code from OKX yet. Until an update carries one, AvgKeeper refuses every plan and buys nothing. `holdings` and `doctor` still work.
+
+## License
+
+Each skill folder carries its own LICENSE file, and that file governs the folder. Everything else in this repository is under the MIT license in [LICENSE](LICENSE).
