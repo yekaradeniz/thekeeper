@@ -15,7 +15,9 @@ import { buyVerb } from './buy.mjs';
 import {
   holdingsVerb, statusVerb, stopVerb, notifyVerb,
 } from './manage.mjs';
-import { doctorVerb, smokeVerb, runChild } from './schedule.mjs';
+import {
+  doctorVerb, smokeVerb, runChild, realSched,
+} from './schedule.mjs';
 
 const BOOL_FLAGS = new Set(['demo', 'dry-run', 'smoke', 'launchd', 'pending']);
 
@@ -58,8 +60,8 @@ export const USAGE = [
   '  mail --level off|problems|all [--profile <p>] [--demo]',
   '  mail --pending [--profile <p>] [--demo]',
   '  mail --sent <id> [--profile <p>] [--demo]',
-  '  doctor --profile <p> [--demo]   (prints the schedule line for you to install)',
-  '  buy --smoke [--launchd] --profile <p> [--demo]   (proves the line doctor prints runs; it does not check that it is installed)',
+  '  doctor --profile <p> [--demo]   (checks the setup and whether the schedule AVGPLAN installed is in place)',
+  '  buy --smoke [--launchd] --profile <p> [--demo]   (proves the buy line of the schedule runs; it does not check that it is installed)',
   '  buy --profile <p> [--demo] [--dry-run]   (your schedule runs this)',
 ].join('\n');
 
@@ -151,6 +153,7 @@ export function makeCtx(env = process.env) {
     runNotify,
     runMail,
     runChild,
+    sched: realSched(),
   };
 }
 

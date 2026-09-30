@@ -10,7 +10,7 @@ import {
 import { readDust } from './holdings.mjs';
 import { todaySplit } from './today.mjs';
 import {
-  preflight, gPlanScheduled, builderDisclosure, keyInactivityWarning,
+  preflight, gPlanScheduled, builderDisclosure, keyInactivityWarning, profileNameRefusal,
 } from './guards.mjs';
 import {
   activePlan, unsettledOnAccount, freshCard, modeOf, buyLockName, LOCK_HELD_LINE, staleLockLine, tornWarning,
@@ -21,6 +21,7 @@ import {
 import { readConfigSafe } from './notify.mjs';
 import { mailLine } from './mail.mjs';
 import { closeStalePeriods } from './buy.mjs';
+import { installSchedule, viaPhrase } from './schedule.mjs';
 
 export const CONFIRM_WORD = 'AVGPLAN';
 
@@ -118,6 +119,13 @@ export async function planVerb(ctx, o) {
     ctx.out(sched.msg);
     return 1;
   }
+  // Before the card and before confirm, since both come through here: a name the schedule cannot keep apart from
+  // another profile's (guards.mjs) never gets a card to read or a plan to start.
+  const nameRefusal = profileNameRefusal(o.profile);
+  if (nameRefusal) {
+    ctx.out(nameRefusal);
+    return 1;
+  }
   const read = readPlanFlags(o);
   if (read.errors) {
     for (const e of read.errors) ctx.out(`REFUSED: ${e}`);
@@ -152,7 +160,7 @@ export async function planVerb(ctx, o) {
     // ever typed; a same-id restart's own every-N-days re-anchor (daysShiftLine, cards.mjs) is named here too, not
     // only on the receipt after the fact.
     const today = localParts(now, timeZone).date;
-    for (const line of planCard(plan, modeOf(call), t, running, config, pre.ownerTest, pre.ip, refusal, today)) ctx.out(line);
+    for (const line of planCard(plan, modeOf(call), t, running, config, pre.ownerTest, pre.ip, refusal, today, ctx.platform || process.platform)) ctx.out(line);
     ctx.store.appendLedger({ kind: 'plan_card', planId: id, profile: call.profile, env: modeOf(call), ...read.fields, timeZone }, now);
     return 0;
   }
@@ -247,6 +255,25 @@ async function confirmLocked(ctx, call, plan, fields, now, ownerTest, ip) {
   if (kind === 'replaces') ctx.out(`It replaces plan ${running.id}.`);
   else if (kind === 'restartsHalted') ctx.out(`This restarts the plan that was halted; it does not replace a different one.${daysShiftLine(cadence, running, local.date) || ''}`);
   else if (kind === 'restartsSame') ctx.out(`This restarts the plan; it does not replace a different one.${daysShiftLine(cadence, running, local.date) || ''}`);
-  ctx.out('Nothing is bought until your schedule runs it. Next: ask your agent to run doctor, which prints the schedule line for you to install.');
-  return 0;
+  // AVGPLAN is the whole job: the plan is already on (the ledger line above), and AvgKeeper installs its own schedule
+  // entry now. A failed install never un-confirms the plan; it says so and names what is still needed.
+  const installed = await installSchedule(ctx, call, plan);
+  if (installed.ok) {
+    ctx.out(`Schedule installed (${viaPhrase(installed.via)}): ${installed.wakes}. Output log: ${installed.logPath}.`);
+    // The same risks doctor prints (schedule.mjs scheduleRisks): a path a macOS privacy rule or a node upgrade can break.
+    for (const r of installed.risks || []) ctx.out(r);
+    for (const w of installed.warnings || []) ctx.out(w);
+    return 0;
+  }
+  // Two different truths. Nothing left installed: a new schedule is all that is missing. Cleanup failed too: an entry
+  // may be left, so the line says where, and never claims nothing is installed. Either way the plan stays on (the
+  // ledger is unchanged) and the exit code is 1, so nothing that reads it mistakes a plan with no schedule for done.
+  if (installed.left) ctx.out(`FAIL: the plan is on, but AvgKeeper could not install its schedule (${installed.reason}), and it could not take its own partial work back, so an entry may be left in ${installed.left}. Ask your agent for doctor, which shows what is installed and how to take it out.`);
+  // An earlier entry was seen, or could not be looked for, and the failure came before it was touched: it may still
+  // run this plan at its own time, so "nothing buys" would be a claim the code has no basis for.
+  else if (installed.mayRemain) ctx.out(`FAIL: the plan is on, but AvgKeeper could not install its schedule (${installed.reason}). An earlier AvgKeeper schedule entry may still be installed and would run this plan at its own time. Ask your agent for doctor, which shows what is installed and how to take it out.`);
+  else ctx.out(`FAIL: the plan is on, but AvgKeeper could not install its schedule (${installed.reason}). Nothing buys until a schedule exists. Ask your agent for doctor, which prints the line to install yourself.`);
+  // Warnings belong to a failed install too (for example the crontab that could not be read on macOS).
+  for (const w of installed.warnings || []) ctx.out(w);
+  return 1;
 }

@@ -97,15 +97,72 @@ export function fakeExchange({
 
 export const places = (okx) => okx.calls.filter((c) => c.type === 'json' && commandKey(c.args) === 'spot place');
 
+// The schedule commands' stand-in: an in-memory crontab, in-memory plist files and a launchd that only remembers
+// which plists were bootstrapped. Records every call in `calls`. No binary runs and no real file is touched, so a
+// test that installs, reads or removes a schedule can never edit the developer's crontab or LaunchAgents.
+// Set crontabWriteFails or bootstrapFails to an exit code to make that step fail.
+export function fakeSched({ crontab = null, uid = 501 } = {}) {
+  const s = {
+    isFake: true,
+    uid,
+    calls: [],
+    crontab, // null means the user has no crontab at all
+    files: new Map(),
+    loaded: new Set(),
+    crontabWriteFails: null,
+    bootstrapFails: null,
+    async crontabRead() {
+      s.calls.push({ cmd: 'crontab', args: ['-l'] });
+      if (s.crontab === null) return { code: 1, stdout: '', stderr: 'crontab: no crontab for test\n' };
+      return { code: 0, stdout: s.crontab, stderr: '' };
+    },
+    async crontabWrite(input) {
+      s.calls.push({ cmd: 'crontab', args: ['-'], input });
+      if (s.crontabWriteFails !== null) return { code: s.crontabWriteFails, stdout: '', stderr: 'crontab: cannot write\n' };
+      s.crontab = input;
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    async launchctl(args) {
+      s.calls.push({ cmd: 'launchctl', args });
+      const [verb, target, plist] = args;
+      const label = verb === 'print' || verb === 'bootout' ? target.split('/').pop() : path.basename(plist || '', '.plist');
+      if (verb === 'bootstrap') {
+        if (s.bootstrapFails !== null) return { code: s.bootstrapFails, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error\n' };
+        if (!s.files.has(plist)) return { code: 5, stdout: '', stderr: 'no such plist\n' };
+        s.loaded.add(label);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (verb === 'bootout') {
+        if (!s.loaded.delete(label)) return { code: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process\n' };
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (verb === 'print') return s.loaded.has(label) ? { code: 0, stdout: 'state = waiting\n', stderr: '' } : { code: 113, stdout: '', stderr: 'Could not find service\n' };
+      return { code: 64, stdout: '', stderr: 'fake launchctl has no reply\n' };
+    },
+    writeFile(p, content) { s.files.set(p, content); },
+    readFile(p) { return s.files.has(p) ? s.files.get(p) : null; },
+    removeFile(p) { s.files.delete(p); },
+  };
+  return s;
+}
+
+// AVGPLAN installs the schedule right after it writes the plan, and the entry it installs names an okx CLI. Most tests
+// confirm a plan to test something else, so a test env that names neither PATH nor AVGKEEPER_OKX_BIN gets a real file
+// (this node binary) as the okx, and the install succeeds on the fake sched. A test that sets PATH or AVGKEEPER_OKX_BIN
+// itself means exactly that (PATH '/nonexistent' is the no-okx case) and is left alone.
+const withOkx = (e) => (e && e.PATH === undefined && e.AVGKEEPER_OKX_BIN === undefined ? { ...e, AVGKEEPER_OKX_BIN: process.execPath } : e);
+
 // A context like the entry script's, with a temp store, a settable clock and recorded output and notices.
 export function makeCtx({ okx = fakeExchange(), env = {}, now = T0, config } = {}) {
   const store = createStore(tmpDir('ak-store-'));
   if (config) store.writeConfig(config);
   let clock = now;
+  let ctxEnv = withOkx(env);
   const ctx = {
     okx,
     store,
-    env,
+    get env() { return ctxEnv; },
+    set env(v) { ctxEnv = withOkx(v); },
     lines: [],
     notified: [],
     mailed: [],
@@ -126,6 +183,7 @@ export function makeCtx({ okx = fakeExchange(), env = {}, now = T0, config } = {
       });
     },
     runChild: async () => ({ code: 0, stdout: '', stderr: '' }),
+    sched: fakeSched(),
   };
   return ctx;
 }

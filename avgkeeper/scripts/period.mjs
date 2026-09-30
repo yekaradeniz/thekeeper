@@ -349,9 +349,8 @@ export function missingPeriodsWarning(ledger, plan, now, lockStale = false) {
   if (lockStale) {
     return `WARNING: ${missing} due ${n} no record ${since}: the buy lock has been held without being freed (see the line above about the buy lock), which refuses every buy while it is held.`;
   }
-  // Review finding (period.mjs:349, should): doctor never reads the crontab or launchd's loaded jobs (smoke's own
-  // FAIL line and SKILL.md both already say so), and doctor prints this very sentence itself, so "Run doctor to
-  // check it is still installed" sent the user back to a screen that cannot answer that question. Named as what
-  // AvgKeeper can actually check (nothing) and what the user can check themselves instead.
-  return `WARNING: ${missing} due ${n} no record ${since}. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule line may be gone. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded.`;
+  // Since AVGPLAN installs the schedule entry itself, doctor reads whether that entry is installed and matches the
+  // plan (schedule.mjs readScheduleState). This line cannot know which cause applies, so it names the candidates and
+  // points at the one screen that can check the entry.
+  return `WARNING: ${missing} due ${n} no record ${since}. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule entry may be gone. Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan.`;
 }

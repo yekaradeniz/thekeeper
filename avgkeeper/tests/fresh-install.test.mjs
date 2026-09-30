@@ -77,7 +77,23 @@ function installFromReadme(specPath) {
     `#!/bin/sh\nAK_FAKE=${shQuote(specPath)} exec ${shQuote(process.execPath)} ${shQuote(FAKE_OKX)} "$@"\n`,
   );
   fs.chmodSync(path.join(bin, 'okx'), 0o755);
-  const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin` };
+  // AVGPLAN installs the schedule itself (2026-09-30), through `crontab` and `launchctl` found on PATH. Stubs first
+  // on PATH keep the real ones out of every spawn: each appends its arguments to calls.log, and keeps its own small
+  // state (a crontab file, a loaded marker) so doctor can read back what confirm installed.
+  const log = path.join(bin, 'calls.log');
+  const stub = (name, body) => {
+    fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "${name} $*" >> ${shQuote(log)}\n${body}\n`);
+    fs.chmodSync(path.join(bin, name), 0o755);
+  };
+  const tab = path.join(bin, 'crontab.txt');
+  const loaded = path.join(bin, 'loaded');
+  stub('crontab', `if [ "$1" = "-l" ]; then if [ -f ${shQuote(tab)} ]; then cat ${shQuote(tab)}; else echo "crontab: no crontab for stub" >&2; exit 1; fi; else cat > ${shQuote(tab)}; fi`);
+  stub('launchctl', `case "$1" in bootstrap) touch ${shQuote(loaded)};; bootout) rm -f ${shQuote(loaded)};; print) [ -f ${shQuote(loaded)} ] || exit 113;; esac`);
+  // The guard marker and the stub directory travel by name: this env is explicit, so nothing is inherited. With them the
+  // entry script's realSched runs crontab and launchctl from the stubs in bin only, and PATH order is a second fence.
+  const env = {
+    HOME: home, PATH: `${bin}:/usr/bin:/bin`, AVGKEEPER_TEST_GUARD: '1', AVGKEEPER_SCHED_BIN_DIR: bin,
+  };
   const parent = path.resolve(AK_ROOT, '..');
   const mkdir = spawnSync('/bin/sh', ['-c', MKDIR_CMD], { env, encoding: 'utf8', cwd: home });
   const copy = spawnSync('/bin/sh', ['-c', COPY_CMD], { env, encoding: 'utf8', cwd: parent });
@@ -132,7 +148,13 @@ test('the update line removes the old copy first, so a second install never nest
 // machine does, next to its own node binary).
 function okxEnv(env, bin) {
   return {
-    HOME: env.HOME, PATH: env.PATH, AVGKEEPER_OWNER_TEST: '1', AVGKEEPER_OKX_BIN: path.join(bin, 'okx'),
+    HOME: env.HOME,
+    PATH: env.PATH,
+    AVGKEEPER_OWNER_TEST: '1',
+    AVGKEEPER_OKX_BIN: path.join(bin, 'okx'),
+    // This env is explicit, so the guard marker is not inherited: pass it and the stub directory on by name.
+    AVGKEEPER_TEST_GUARD: '1',
+    AVGKEEPER_SCHED_BIN_DIR: bin,
   };
 }
 
@@ -155,16 +177,23 @@ test('holdings, plan, plan --confirm AVGPLAN, doctor and buy --smoke all run end
   assertClean(confirm, 'plan --confirm AVGPLAN');
   assert.equal(confirm.status, 0, `${confirm.stdout}${confirm.stderr}`);
   assert.match(confirm.stdout, /is on\./, confirm.stdout);
+  // The schedule went in through the stubs, never a real binary: launchd on macOS, the crontab elsewhere.
+  const via = process.platform === 'darwin' ? 'launchd' : 'crontab';
+  assert.match(confirm.stdout, new RegExp(`Schedule installed \\(${via === 'launchd' ? "launchd, macOS's own scheduler" : 'crontab, the system scheduler'}\\): AvgKeeper wakes every day at 10:00 machine time\\. Output log: `), confirm.stdout);
+  const calls = fs.readFileSync(path.join(bin, 'calls.log'), 'utf8');
+  assert.match(calls, via === 'launchd' ? /^launchctl bootstrap gui\/\d+ .*com\.avgkeeper\.buy\.newcomer\.plist$/m : /^crontab -$/m, calls);
+  if (via === 'launchd') assert.ok(fs.existsSync(path.join(env.HOME, 'Library', 'LaunchAgents', 'com.avgkeeper.buy.newcomer.plist')), 'the plist lands under the test HOME');
 
   const doctor = run(entry, call, ['doctor', '--profile', PROFILE]);
   assertClean(doctor, 'doctor');
   assert.equal(doctor.status, 0, `${doctor.stdout}${doctor.stderr}`);
-  assert.match(doctor.stdout, /Install one of these yourself\./, doctor.stdout);
+  assert.match(doctor.stdout, new RegExp(`Schedule: installed \\(${via === 'launchd' ? "launchd, macOS's own scheduler" : 'crontab, the system scheduler'}\\)`), doctor.stdout);
+  assert.doesNotMatch(doctor.stdout, /Install one of these yourself\./, doctor.stdout);
 
-  const smoke = run(entry, call, ['buy', '--smoke', '--profile', PROFILE]);
+  const smoke = run(entry, call, ['buy', '--smoke', ...(via === 'launchd' ? ['--launchd'] : []), '--profile', PROFILE]);
   assertClean(smoke, 'buy --smoke');
   assert.equal(smoke.status, 0, `${smoke.stdout}${smoke.stderr}`);
-  assert.match(smoke.stdout, /PASS: the cron line doctor prints runs/, smoke.stdout);
+  assert.match(smoke.stdout, new RegExp(`PASS: the ${via} schedule line runs`), smoke.stdout);
 });
 
 test('a profile the newcomer never saved in the okx config refuses in plain words, not a crash', () => {
@@ -182,7 +211,9 @@ test('a profile the newcomer never saved in the okx config refuses in plain word
 test('without owner test mode, a newcomer meets exactly what the README says a build with no code does', () => {
   assert.equal(BUILDER_CODE, '', 'this build ships with no code; once OKX issues one, rewrite this test and the README section it pins');
   const { env, bin, entry } = installFromReadme(writeSpec());
-  const call = { HOME: env.HOME, PATH: env.PATH, AVGKEEPER_OKX_BIN: path.join(bin, 'okx') };
+  const call = {
+    HOME: env.HOME, PATH: env.PATH, AVGKEEPER_OKX_BIN: path.join(bin, 'okx'), AVGKEEPER_TEST_GUARD: '1', AVGKEEPER_SCHED_BIN_DIR: bin,
+  };
   const planFlags = ['--profile', PROFILE, '--budget', '10', '--every', 'month:15', '--method', 'equal'];
   const holdings = run(entry, call, ['holdings', '--profile', PROFILE]);
   assertClean(holdings, 'holdings');
@@ -210,7 +241,7 @@ test('without owner test mode, a newcomer meets exactly what the README says a b
 // out first, with its own `cd ..`, and this follows that from inside the folder.
 test('from inside the downloaded folder, the README\'s own cd step then its copy command still install the skill', () => {
   const home = fs.realpathSync(tmpDir('ak-freshhome-'));
-  const env = { HOME: home, PATH: '/usr/bin:/bin' };
+  const env = { HOME: home, PATH: '/usr/bin:/bin', AVGKEEPER_TEST_GUARD: '1' };
   const cdUp = backtickCommand(README, 'cd ..');
   assert.equal(cdUp, 'cd ..');
   const mkdir = spawnSync('/bin/sh', ['-c', MKDIR_CMD], { env, encoding: 'utf8', cwd: home });

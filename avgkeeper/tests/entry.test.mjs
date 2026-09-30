@@ -28,7 +28,8 @@ test('buy --launchd without --smoke is refused and reads nothing', async () => {
 });
 
 test('the usage line does not claim smoke checks the install', () => {
-  assert.match(USAGE, /buy --smoke \[--launchd\] --profile <p> \[--demo\] {3}\(proves the line doctor prints runs; it does not check that it is installed\)/);
+  assert.match(USAGE, /buy --smoke \[--launchd\] --profile <p> \[--demo\] {3}\(proves the buy line of the schedule runs; it does not check that it is installed\)/);
+  assert.match(USAGE, /doctor --profile <p> \[--demo\] {3}\(checks the setup and whether the schedule AVGPLAN installed is in place\)/);
   assert.doesNotMatch(USAGE, /proves the installed/);
 });
 

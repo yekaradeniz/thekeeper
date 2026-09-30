@@ -22,6 +22,16 @@
 //   loads with the test files themselves.
 // - 2026-09-19: a process killed by a signal never runs its exit handler. tools/mutate.mjs gives each mutant's
 //   suite a TMPDIR inside the copy it deletes, and the stale sweep below removes anything else within the hour.
+//
+// A fourth hole, the same class (a test reaching outside its sandbox) though not a temp leak, 2026-09-30: AVGPLAN
+// began installing the schedule itself, and tests/fresh-install.test.mjs spawned the real entry script before its
+// stubs were on PATH. A real launchd job (com.avgkeeper.buy.newcomer) was bootstrapped into the developer's gui
+// domain and had to be removed by hand. This file now also sets AVGKEEPER_TEST_GUARD=1, which every child inherits,
+// and realSched in scripts/schedule.mjs then runs crontab and launchctl only from the directory named by
+// AVGKEEPER_SCHED_BIN_DIR, failing without a spawn when none is named. A test that spawns with an explicit env must
+// pass both variables on (tests/fresh-install.test.mjs does), and a lint in tests/sched-guard.test.mjs fails when one
+// does not. The same guard covers files: realSched.writeFile and removeFile refuse any path under the real home (from
+// os.userInfo(), not $HOME). tests/sched-guard.test.mjs pins all of it.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,6 +79,43 @@ export function sweepStale(root = os.tmpdir(), now = Date.now()) {
   return removed;
 }
 
+// tests/sched-guard.test.mjs makes decoy folders directly under the real home (the file guard is tested by asking it
+// to write there, so the decoy has to be a real-home path) and removes them in a finally block. A process killed
+// between the two would leave one forever, and the temp sweep above never looks in the home folder. So this sweeps
+// only directories directly under the home whose name starts with `.ak-guard-files-`, and only when older than
+// STALE_MS: no other name, no file, no symlink to a directory, nothing deeper. The same time budget applies.
+export const HOME_DECOY = /^\.ak-guard-files-/;
+
+export function sweepHomeDecoys(home = os.userInfo().homedir, now = Date.now()) {
+  const started = Date.now();
+  let removed = 0;
+  let dir;
+  try {
+    dir = fs.opendirSync(home);
+  } catch {
+    return removed;
+  }
+  try {
+    for (let e = dir.readSync(); e !== null; e = dir.readSync()) {
+      if (Date.now() - started > SWEEP_BUDGET_MS) break;
+      if (!e.isDirectory() || !HOME_DECOY.test(e.name)) continue;
+      const p = path.join(home, e.name);
+      try {
+        if (now - fs.lstatSync(p).mtimeMs < STALE_MS) continue;
+        fs.rmSync(p, { recursive: true, force: true });
+        removed += 1;
+      } catch {
+        // another test process removed it first, which is the outcome this wants
+      }
+    }
+  } finally {
+    dir.closeSync();
+  }
+  return removed;
+}
+
+process.env.AVGKEEPER_TEST_GUARD = '1';
+
 const made = [];
 const original = fs.mkdtempSync;
 
@@ -80,6 +127,7 @@ fs.mkdtempSync = function mkdtempSyncTracked(...args) {
 syncBuiltinESMExports();
 
 sweepStale();
+sweepHomeDecoys();
 
 process.on('exit', () => {
   for (const dir of made) {

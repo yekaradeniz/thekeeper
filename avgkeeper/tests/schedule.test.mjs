@@ -1,6 +1,6 @@
 // avgkeeper/tests/schedule.test.mjs
 import {
-  makeCtx, fakeExchange, LOSING, OWNER, text, kinds, tmpDir, T0, DAY, withoutComments,
+  makeCtx, fakeSched, fakeExchange, LOSING, OWNER, text, kinds, tmpDir, T0, DAY, withoutComments,
 } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   buySchedule, launchdConfig, doctorVerb, smokeVerb, shWord, ENTRY_SCRIPT, runChild, scheduleRisks, savedPlistDiffWarning, launchdPlistPath,
-  launchdRemoveLines,
+  launchdRemoveLines, scheduleWakes, viaPhrase,
 } from '../scripts/schedule.mjs';
 import { OkxError } from '../scripts/runner.mjs';
 import { NO_CLI_LINE } from '../scripts/guards.mjs';
@@ -107,8 +107,15 @@ async function planned(env, config) {
   const ctx = makeCtx({ env, okx: fakeExchange(LOSING), config });
   await planVerb(ctx, planFlags);
   await planVerb(ctx, { ...planFlags, confirm: 'AVGPLAN' });
+  // Confirm installs into the fake; these tests are about what doctor prints when nothing is installed yet, so the
+  // fake starts empty again. The installed case has its own tests (tests/install.test.mjs).
+  ctx.sched = fakeSched();
   ctx.lines.length = 0;
   return ctx;
+}
+// An entry a stop could not take out: doctor must still print the removal commands for it.
+function leftoverPlist(ctx) {
+  ctx.sched.files.set(launchdPlistPath({ profile: 't', demo: false }, ctx.realHome), '<plist/>');
 }
 
 test('the cron line fires at the plan time with the schedule environment', () => {
@@ -243,6 +250,7 @@ test('doctor --demo prints the demo plist path and --demo in ProgramArguments, n
   const ctx = makeCtx({ env: { ...OWNER, PATH: okxDir(), HOME: '/Users/x' }, okx: fakeExchange(LOSING) });
   await planVerb(ctx, { ...planFlags, demo: true });
   await planVerb(ctx, { ...planFlags, demo: true, confirm: 'AVGPLAN' });
+  ctx.sched = fakeSched(); // confirm installed into the fake; this test reads doctor's not-installed output
   ctx.lines.length = 0;
   await doctorVerb(ctx, { profile: 't', demo: true });
   const t = text(ctx);
@@ -274,7 +282,7 @@ test('doctor hedges "No plan yet" while the ledger is torn, instead of stating i
   assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
   assert.match(t, /WARNING: line 1 of .*ledger\.jsonl could not be read and was skipped/, t);
-  assert.match(t, /No plan yet\. The schedule line depends on the plan time, so make a plan first\. AvgKeeper cannot be sure: a ledger line could not be read \(see the WARNING above\)\./, t);
+  assert.match(t, /No plan yet: make one with AVGPLAN\. No AvgKeeper schedule entry is installed for profile t \(live\)\. AvgKeeper cannot be sure: a ledger line could not be read \(see the WARNING above\)\./, t);
 });
 
 // Finding 13 of the 2026-09-27 release-readiness review: doctor used to PASS a key that cannot trade.
@@ -293,14 +301,39 @@ test('doctor fails a key that cannot trade, and its PASS line names both permiss
 test('doctor prints removal lines for the last plan even after it was stopped', async () => {
   const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
   await stopVerb(ctx, { profile: 't' });
+  leftoverPlist(ctx);
   ctx.lines.length = 0;
   assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
   const plistPath = launchdPlistPath({ profile: 't', demo: false }, ctx.realHome);
   assert.ok(!t.includes('No plan yet'), t);
-  assert.match(t, /No plan is running now \(it was stopped or replaced\)\./);
-  assert.ok(t.includes(`If you used launchd, run both: launchctl bootout gui/$(id -u) ${shWord(plistPath)}, then rm ${shWord(plistPath)}.`), t);
-  assert.match(t, /If you used crontab, delete the AvgKeeper line from your crontab yourself \(crontab -e\)\./);
+  assert.match(t, /No plan is running now \(it was stopped or replaced\), but an AvgKeeper schedule entry from an earlier plan is still installed\./);
+  assert.ok(t.includes(`If you used launchd, run both: launchctl bootout gui/$(id -u)/com.avgkeeper.buy.t, then rm ${shWord(plistPath)}.`), t);
+  assert.match(t, /If you used crontab, delete the AvgKeeper lines from your crontab yourself \(crontab -e\): the "# avgkeeper" comment and the line under it\./);
+});
+
+// Item 5 of the 2026-09-30 follow-up: once stop has removed the entry, doctor says nothing is installed and prints
+// no removal commands; when the read itself fails it says it could not tell and prints them.
+test('doctor after stop: nothing installed prints one sentence and no removal commands', async () => {
+  const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
+  await stopVerb(ctx, { profile: 't' });
+  ctx.lines.length = 0;
+  assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
+  const t = text(ctx);
+  assert.match(t, /^No plan is running now \(it was stopped or replaced\)\. No AvgKeeper schedule entry is installed for profile t \(live\)\.$/m, t);
+  assert.doesNotMatch(t, /launchctl bootout|If you used crontab|rm /, t);
+});
+
+test('doctor after stop: a crontab it cannot read is named unknown and the removal commands are printed', async () => {
+  const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
+  await stopVerb(ctx, { profile: 't' });
+  ctx.sched.crontabRead = async () => ({ code: 2, stdout: '', stderr: 'crontab: permission denied\n' });
+  ctx.lines.length = 0;
+  assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
+  const t = text(ctx);
+  assert.match(t, /AvgKeeper could not tell whether a schedule entry is installed \(crontab -l exited 2: crontab: permission denied\)\. If one is, take it out so it stops firing for nothing:/, t);
+  assert.match(t, /If you used crontab, delete the AvgKeeper lines/, t);
+  assert.doesNotMatch(t, /No AvgKeeper schedule entry is installed/, t);
 });
 
 test('doctor never printed a removal line before any plan ever existed', async () => {
@@ -483,13 +516,14 @@ test('doctor for a halted plan prints no install or prove-it block, only the rem
   ctx.store.appendLedger({ kind: 'plan_halted', planId: plan.id, profile: 't', env: 'live', reason: 'something unknown.' }, ctx.now());
   assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
-  assert.doesNotMatch(t, /Schedule: the buy runs/);
+  assert.doesNotMatch(t, /Schedule: AvgKeeper wakes/);
   assert.doesNotMatch(t, /Then prove it:/);
   assert.doesNotMatch(t, /Option 1, crontab/);
   // Review finding (schedule.mjs:292, later): haltedLine (printed just above) already ends "Nothing is bought
   // until you make a new plan."; this block repeated that exact clause word for word on the next line.
   assert.equal((t.match(/Nothing is bought until you make a new plan/g) || []).length, 1, t);
-  assert.match(t, /Make one first, then run doctor again for its schedule line\./);
+  assert.match(t, /^Make a new plan with AVGPLAN; it replaces this schedule entry\.$/m);
+  assert.doesNotMatch(t, /run doctor again/);
   assert.match(t, /If a schedule line from before is still installed, it now buys nothing\. To take it out:/);
   assert.match(t, /crontab -e/);
 });
@@ -502,7 +536,7 @@ test('doctor prints Last run and warns when due periods have no record, matching
   await doctorVerb(ctx, { profile: 't' });
   const t = text(ctx);
   assert.match(t, /Last run: never; the plan started 2026-10-05 10:00 \(Europe\/Istanbul\)\./);
-  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule line may be gone\. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded\./);
+  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule entry may be gone\. Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan\./);
 });
 
 // Finding 12 remaining: a stale buy lock held by a live pid refuses every scheduled run before it ever writes a
@@ -535,7 +569,7 @@ test('doctor never blames a dead-pid stale lock for missing periods', async () =
   await doctorVerb(ctx, { profile: 't' });
   const t = text(ctx);
   assert.doesNotMatch(t, /still held/);
-  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule line may be gone\. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded\./);
+  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule entry may be gone\. Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan\./);
 });
 
 // Spec section 9, "Surfaces": doctor prints the mail line and the pending count, from the same shared reader
@@ -600,10 +634,11 @@ test('doctor says every hour at :MM machine time for an hourly plan, and prints 
   const hourlyFlags = { profile: 't', budget: '10', every: 'hour', method: 'equal' };
   await planVerb(ctx, hourlyFlags);
   await planVerb(ctx, { ...hourlyFlags, confirm: 'AVGPLAN' });
+  ctx.sched = fakeSched(); // confirm installed into the fake; this test reads doctor's not-installed output
   ctx.lines.length = 0;
   await doctorVerb(ctx, { profile: 't' });
   const t = text(ctx);
-  assert.match(t, /^Schedule: the buy runs every hour at :05 machine time\. Install one of these yourself\.$/m);
+  assert.match(t, /^Schedule: AvgKeeper wakes every hour at :05 machine time\. Install one of these yourself\.$/m);
   assert.match(t, /^5 \* \* \* \* HOME=/m);
 });
 
@@ -639,10 +674,22 @@ test('doctor never credits an earlier incarnation\'s own buy as this plan\'s Las
 });
 
 // Daily and longer cadences must read byte for byte as before (section 10, "Unchanged").
-test('doctor keeps the daily wording unchanged', async () => {
+test('doctor says a plain daily plan wakes every day and buys each time, with no buy-days clause', async () => {
   const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
   await doctorVerb(ctx, { profile: 't' });
-  assert.match(text(ctx), /^Schedule: the buy runs daily at 10:00 machine time and buys only on the plan's buy days\. Install one of these yourself\.$/m);
+  assert.match(text(ctx), /^Schedule: AvgKeeper wakes every day at 10:00 machine time\. Install one of these yourself\.$/m);
+});
+
+// A weekly plan's entry still wakes every day; the clause says it buys only on the plan's buy days. One reader
+// (scheduleWakes) feeds the receipt and doctor, so this pins the wording for every cadence in one place.
+test('scheduleWakes: daily and hourly wake on every run, week, month and days:N buy only on buy days', () => {
+  assert.equal(scheduleWakes({ cadence: 'day', at: '10:00' }), 'AvgKeeper wakes every day at 10:00 machine time');
+  assert.equal(scheduleWakes({ cadence: 'hour', at: ':05' }), 'AvgKeeper wakes every hour at :05 machine time');
+  for (const cadence of ['week:mon', 'month:5', 'days:3']) {
+    assert.equal(scheduleWakes({ cadence, at: '10:00' }), "AvgKeeper wakes every day at 10:00 machine time and buys only on the plan's buy days", cadence);
+  }
+  assert.equal(viaPhrase('launchd'), "launchd, macOS's own scheduler");
+  assert.equal(viaPhrase('crontab'), 'crontab, the system scheduler');
 });
 
 // The exact planLine (cards.mjs) `planned()`'s own plan prints: 10.00 USDT, every day, default 10:00, method
@@ -664,7 +711,7 @@ test('smoke passes on exit 0 with the dry-run summary, says it does not check th
   assert.equal(await smokeVerb(ctx, { profile: 't' }), 0);
   assert.equal(ledgerText(ctx), before);
   assert.ok(!kinds(ctx).includes('buy_smoke'));
-  assert.match(text(ctx), /PASS: the cron line doctor prints runs: the buy ran as a dry run under cron's environment\. This does not check that the line is installed\./);
+  assert.match(text(ctx), /PASS: the cron schedule line runs: the buy ran as a dry run under cron's environment\. This does not check that the line is installed\./);
   assert.ok(seen[0].includes('AVGKEEPER_SCHEDULED=1'));
   assert.ok(seen[0].includes('--dry-run'));
   assert.equal(seen.length, 2);
@@ -709,7 +756,7 @@ test('smoke fails when the child\'s stdout never shows the running plan (a diffe
 test('smoke fails when the child dry run carries the time zone WARNING', async () => {
   const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
   const plan = activePlan(ctx.store.readLedger(), { profile: 't', demo: false });
-  const warning = `WARNING: this plan was made in ${plan.timeZone}, but this Mac is now on Europe/London. The schedule fires at machine time, so make a new plan and run doctor again.`;
+  const warning = `WARNING: this plan was made in ${plan.timeZone}, but this Mac is now on Europe/London. The schedule fires at machine time, so make a new plan with AVGPLAN, which reinstalls the schedule.`;
   ctx.runChild = async () => ({ code: 0, stdout: `${warning}\n${DRY_OK.stdout}`, stderr: '' });
   assert.equal(await smokeVerb(ctx, { profile: 't' }), 1);
   const t = text(ctx);
@@ -881,11 +928,11 @@ test('smoke --launchd fails when the plist is not saved, fails when it differs, 
   const seen = [];
   ctx.runChild = async (file, args) => { seen.push([file, args]); return DRY_OK; };
   assert.equal(await smokeVerb(ctx, { profile: 't', launchd: true }), 1);
-  assert.ok(text(ctx).includes(`FAIL: the launchd plist is not saved yet at ${l.plistPath}.`), text(ctx));
+  assert.ok(text(ctx).includes(`FAIL: the launchd plist is not saved yet at ${l.plistPath}. Make the plan again with AVGPLAN, which saves and loads it.`), text(ctx));
   fs.mkdirSync(path.dirname(l.plistPath), { recursive: true });
   fs.writeFileSync(l.plistPath, l.plist.replace('<integer>10</integer>', '<integer>11</integer>'));
   assert.equal(await smokeVerb(ctx, { profile: 't', launchd: true }), 1);
-  assert.match(text(ctx), /FAIL: the saved plist differs from the one doctor prints now; save the new one and load it again\./);
+  assert.match(text(ctx), /FAIL: the saved plist differs from the one this plan needs; make the plan again with AVGPLAN, which replaces it\./);
   assert.equal(seen.length, 0);
   fs.writeFileSync(l.plistPath, `${l.plist}\n`);
   const saved = fs.readFileSync(l.plistPath, 'utf8');
@@ -895,7 +942,7 @@ test('smoke --launchd fails when the plist is not saved, fails when it differs, 
   const [file, args] = seen[0];
   assert.equal(file, '/usr/bin/env');
   assert.deepEqual(args, ['-i', ...l.cronEnv.map(([k, v]) => `${k}=${v}`), l.node, l.script, 'buy', '--dry-run', '--profile', 't']);
-  assert.match(text(ctx), /PASS: the launchd line doctor prints runs/);
+  assert.match(text(ctx), /PASS: the launchd schedule line runs/);
 });
 
 // Item 9: the plist's EnvironmentVariables are exactly buySchedule's cronEnv, in order.
@@ -938,7 +985,7 @@ test('the load and remove commands quote a plist path with a space', () => {
   const l = launchdConfig({ PATH: okxDir(), HOME: '/Users/x' }, { profile: 't' }, at1005, '/Users/my home');
   assert.equal(l.load, "launchctl bootstrap gui/$(id -u) '/Users/my home/Library/LaunchAgents/com.avgkeeper.buy.t.plist'");
   assert.deepEqual(l.remove, [
-    "launchctl bootout gui/$(id -u) '/Users/my home/Library/LaunchAgents/com.avgkeeper.buy.t.plist'",
+    'launchctl bootout gui/$(id -u)/com.avgkeeper.buy.t',
     "rm '/Users/my home/Library/LaunchAgents/com.avgkeeper.buy.t.plist'",
   ]);
   assert.deepEqual(l.remove, launchdRemoveLines({ profile: 't' }, '/Users/my home'));
@@ -951,7 +998,7 @@ test('the launchd and crontab removal wording each has exactly one writer in the
   const dir = path.join(path.dirname(ENTRY_SCRIPT));
   const code = fs.readdirSync(dir).filter((f) => f.endsWith('.mjs')).map((f) => withoutComments(fs.readFileSync(path.join(dir, f), 'utf8'))).join('\n');
   assert.equal(code.split('launchctl bootout').length - 1, 1, 'launchctl bootout');
-  assert.equal(code.split('delete the AvgKeeper line').length - 1, 1, 'the crontab removal sentence');
+  assert.equal(code.split('delete the AvgKeeper lines').length - 1, 1, 'the crontab removal sentence');
 });
 
 // Finding 12 of the 2026-09-27 release-readiness review: doctor ran preflight (okx CLI and OKX calls) before its
@@ -970,12 +1017,13 @@ test('doctor exits 1 on a FAIL while a plan still runs, after printing the sched
   ctx.lines.length = 0;
   assert.equal(await doctorVerb(ctx, { profile: 't' }), 1);
   assert.ok(text(ctx).includes('FAIL:'), text(ctx));
-  assert.match(text(ctx), /Schedule: the buy runs daily/);
+  assert.match(text(ctx), /Schedule: AvgKeeper wakes every day at /);
 });
 
 test('after stop, doctor still prints the removal commands when OKX refuses the key', async () => {
   const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
   await stopVerb(ctx, { profile: 't' });
+  leftoverPlist(ctx);
   const inner = ctx.okx.json;
   ctx.okx.json = async (args, call) => {
     if (args.join(' ') === 'account config') throw new OkxError('Error: Invalid OK-ACCESS-KEY', 'auth');
@@ -986,12 +1034,13 @@ test('after stop, doctor still prints the removal commands when OKX refuses the 
   assert.ok(ctx.lines.includes("FAIL: OKX did not accept API key t (Invalid OK-ACCESS-KEY). Check this key on the OKX website; if it was deleted, make a new one and save it yourself with okx config init."), text(ctx));
   const [bootout, rm] = launchdRemoveLines({ profile: 't' }, ctx.realHome);
   assert.ok(ctx.lines.includes(`If you used launchd, run both: ${bootout}, then ${rm}.`), text(ctx));
-  assert.ok(ctx.lines.includes('If you used crontab, delete the AvgKeeper line from your crontab yourself (crontab -e).'), text(ctx));
+  assert.ok(ctx.lines.includes('If you used crontab, delete the AvgKeeper lines from your crontab yourself (crontab -e): the "# avgkeeper" comment and the line under it.'), text(ctx));
 });
 
 test('after stop, doctor still prints the removal commands with no okx CLI at all', async () => {
   const ctx = await planned({ ...OWNER, PATH: okxDir(), HOME: '/Users/x' });
   await stopVerb(ctx, { profile: 't' });
+  leftoverPlist(ctx);
   ctx.okx = {
     raw: async () => { throw new OkxError('could not start okx: spawn okx ENOENT', 'missing'); },
     json: async () => { throw new OkxError('could not start okx: spawn okx ENOENT', 'missing'); },
@@ -1006,8 +1055,7 @@ test('doctor names a saved launchd plist for this profile even with no ledger at
   const ctx = makeCtx({ env: OWNER, okx: fakeExchange(LOSING) });
   ctx.realHome = tmpDir('ak-home-');
   const plistPath = launchdPlistPath({ profile: 't', demo: false }, ctx.realHome);
-  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-  fs.writeFileSync(plistPath, '<plist/>\n');
+  ctx.sched.files.set(plistPath, '<plist/>\n');
   assert.equal(await doctorVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
   assert.ok(t.includes(`No plan is on record for profile t, but a launchd plist for it is still saved at ${plistPath}.`), t);
@@ -1030,7 +1078,7 @@ test('doctor names a stale buy lock read-only and a time zone change', async () 
   assert.match(t, /The buy lock from \d{4}-\d\d-\d\dT\d\d:\d\dZ is still held \(another AvgKeeper run, or one that crashed\)\./);
   assert.ok(t.includes(`If no AvgKeeper run is working, delete ${ctx.store.home}/buy-t-live.lock.`), t);
   assert.doesNotMatch(t, /could not buy/);
-  assert.ok(ctx.lines.includes('WARNING: this plan was made in Europe/Istanbul, but this Mac is now on Asia/Tokyo. The schedule fires at machine time, so make a new plan and run doctor again.'));
+  assert.ok(ctx.lines.includes('WARNING: this plan was made in Europe/Istanbul, but this Mac is now on Asia/Tokyo. The schedule fires at machine time, so make a new plan with AVGPLAN, which reinstalls the schedule.'));
 });
 
 test('smoke fails on a non-zero exit and prints the command to rerun it', async () => {

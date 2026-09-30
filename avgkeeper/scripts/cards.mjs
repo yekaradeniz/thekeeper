@@ -200,7 +200,16 @@ export function daysShiftLine(cadence, running, today) {
 // today: the local date this card is shown on (plan.mjs's localParts), or null; passed only so a same-id restart
 // of a days:N cadence can name its own re-anchor (daysShiftLine above) before the user ever types AVGPLAN. A
 // caller with no use for that (most tests) simply omits it, and the card reads exactly as it did before.
-export function planCard(p, mode, t, running = null, config = {}, ownerTest = false, ip = null, refusal = null, today = null) {
+// The consent screen must say that AVGPLAN also changes the computer's own scheduler. platform is the card's own
+// (plan.mjs passes ctx.platform), or null when the caller does not know it: then both forms are named.
+export function scheduleEntryLine(platform) {
+  const form = platform === 'darwin' ? 'launchd'
+    : platform ? 'a marked crontab entry'
+      : 'launchd on macOS, a marked crontab entry on Linux';
+  return `Typing AVGPLAN also adds AvgKeeper's own schedule entry on this computer (${form}); stop removes it.`;
+}
+
+export function planCard(p, mode, t, running = null, config = {}, ownerTest = false, ip = null, refusal = null, today = null, platform = null) {
   const cadence = parseCadence(p.cadence);
   const keyWarning = keyInactivityWarning(ip, cadence);
   // Review finding (buy.mjs:442): a real buy right now would skip on free USDT alone, whatever the split above
@@ -237,7 +246,7 @@ export function planCard(p, mode, t, running = null, config = {}, ownerTest = fa
   // own words (plan.mjs's confirmRefusal), or null when confirm would not refuse for either reason.
   const ending = refusal
     ? [`AVGPLAN would be refused right now: ${refusal}`]
-    : ['To start it, type AVGPLAN. This card is good for 30 minutes.'];
+    : [scheduleEntryLine(platform), 'To start it, type AVGPLAN. This card is good for 30 minutes.'];
   return [
     `AvgKeeper plan (${mode}, profile ${p.profile})`,
     planLine(p),

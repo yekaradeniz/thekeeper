@@ -239,7 +239,7 @@ test('status warns when the schedule looks dead: confirmed, then never once ran'
   assert.equal(await statusVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
   assert.match(t, /Last run: never; the plan started 2026-10-05 08:00 \(Europe\/Istanbul\)\./);
-  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule line may be gone\. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded\./);
+  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule entry may be gone\. Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan\./);
 });
 
 // Finding 12 remaining: a stale buy lock held by a live pid refuses every scheduled run before it ever writes a
@@ -280,7 +280,7 @@ test('status never blames a dead-pid stale lock for missing periods, and the nex
   assert.equal(await statusVerb(ctx, { profile: 't' }), 0);
   const t = text(ctx);
   assert.doesNotMatch(t, /still held/);
-  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule line may be gone\. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded\./);
+  assert.match(t, /WARNING: 5 due periods have no record since it started\. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time \(crontab skips those\), or the schedule entry may be gone\. Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan\./);
   ctx.env = SCHEDULED;
   assert.equal(await buyVerb(ctx, { profile: 't' }), 0);
   assert.match(text(ctx), /AvgKeeper bought 2026-10-09: ETH 6\.67 USDT, BTC 3\.33 USDT\./);
@@ -527,53 +527,86 @@ test('stop ends the plan without a typed word', async () => {
 
 // Item 3 of the 2026-09-27 release audit: stop's own text names the exact same two commands doctor prints for
 // launchd (bootout, then rm the file), rather than a vague pointer back at doctor's own output.
-test('stop names the exact launchd removal commands on macOS', async () => {
+// 2026-09-30: stop removes the entry itself; the manual removal commands are the fallback when that fails, so these
+// tests make the removal fail (the plist cannot be deleted on macOS, the crontab cannot be written elsewhere).
+test('stop names the exact launchd removal commands on macOS when it could not remove the schedule', async () => {
   const ctx = makeCtx({ env: OWNER, okx: fakeExchange(LOSING) });
   await planVerb(ctx, flags);
   await planVerb(ctx, { ...flags, confirm: 'AVGPLAN' });
+  ctx.sched.files.set(launchdPlistPath(CALL, ctx.realHome), '<plist/>');
+  ctx.sched.removeFile = () => { throw new Error('EACCES: permission denied'); };
   ctx.lines.length = 0;
   assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
   const plistPath = launchdPlistPath(CALL, ctx.realHome);
   const [bootout, rm] = launchdRemoveLines(CALL, ctx.realHome);
-  assert.equal(bootout, `launchctl bootout gui/$(id -u) ${shWord(plistPath)}`);
+  assert.equal(bootout, 'launchctl bootout gui/$(id -u)/com.avgkeeper.buy.t');
+  assert.equal(rm, `rm ${shWord(plistPath)}`);
   assert.deepEqual(ctx.lines.slice(-3), [
-    'If you installed a schedule line, it still runs and now buys nothing. To take it out:',
+    'The schedule could not be removed (EACCES: permission denied), so an installed entry may still fire and now buys nothing. To take it out:',
     `If you used launchd, run both: ${bootout}, then ${rm}.`,
-    'If you used crontab, delete the AvgKeeper line from your crontab yourself (crontab -e).',
+    'If you used crontab, delete the AvgKeeper lines from your crontab yourself (crontab -e): the "# avgkeeper" comment and the line under it.',
   ]);
 });
 
-test('stop names crontab removal only, off macOS', async () => {
+test('stop names crontab removal only, off macOS, when it could not remove the schedule', async () => {
   const ctx = makeCtx({ env: OWNER, okx: fakeExchange(LOSING) });
   ctx.platform = 'linux';
   await planVerb(ctx, flags);
   await planVerb(ctx, { ...flags, confirm: 'AVGPLAN' });
+  ctx.sched.crontab = '5 9 * * * avgkeeper.mjs buy --profile t >> /tmp/x 2>&1\n';
+  ctx.sched.crontabWriteFails = 1;
   assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
   assert.deepEqual(ctx.lines.slice(-2), [
-    'If you installed a schedule line, it still runs and now buys nothing. To take it out:',
-    'If you used crontab, delete the AvgKeeper line from your crontab yourself (crontab -e).',
+    'The schedule could not be removed (crontab write exited 1: crontab: cannot write), so an installed entry may still fire and now buys nothing. To take it out:',
+    'If you used crontab, delete the AvgKeeper lines from your crontab yourself (crontab -e): the "# avgkeeper" comment and the line under it.',
   ]);
   assert.doesNotMatch(text(ctx), /launchctl/);
 });
 
 // Finding 12 of the 2026-09-27 release-readiness review: a second stop, weeks later, used to say only "Nothing
 // changed." Once a plan ever ran on this profile, it names the removal commands again, from local facts only.
-test('a second stop still names the removal commands; a stop before any plan names none', async () => {
+test('a second stop still tries the removal; a stop before any plan touches nothing', async () => {
   const ctx = makeCtx({ env: OWNER, okx: fakeExchange(LOSING) });
   assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
-  assert.doesNotMatch(text(ctx), /launchctl|crontab/);
+  assert.doesNotMatch(text(ctx), /launchctl|crontab|Schedule/);
+  assert.deepEqual(ctx.sched.calls, [], 'no plan ever ran, so no schedule command runs');
   await planVerb(ctx, flags);
   await planVerb(ctx, { ...flags, confirm: 'AVGPLAN' });
   await stopVerb(ctx, { profile: 't' });
   ctx.lines.length = 0;
+  // A leftover entry (the first stop could not remove it, say) is taken out by the second stop.
+  const plist = launchdPlistPath(CALL, ctx.realHome);
+  ctx.sched.files.set(plist, '<plist/>');
   assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
-  const [bootout, rm] = launchdRemoveLines(CALL, ctx.realHome);
+  // Item 10 of the 2026-09-30 review: "Nothing changed." is not printed when the removal then removes something.
+  assert.deepEqual(ctx.lines, [
+    'No plan was running on profile t (live).',
+    'Schedule removed.',
+  ]);
+  assert.equal(ctx.sched.files.has(plist), false);
+  // A third stop finds nothing to remove, so "Nothing changed." is true and is said.
+  ctx.lines.length = 0;
+  assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
   assert.deepEqual(ctx.lines, [
     'No plan was running on profile t (live). Nothing changed.',
-    'If a schedule line from an earlier plan is still installed, take it out:',
-    `If you used launchd, run both: ${bootout}, then ${rm}.`,
-    'If you used crontab, delete the AvgKeeper line from your crontab yourself (crontab -e).',
+    'No AvgKeeper schedule entry was found for this profile, so there was nothing to remove.',
   ]);
+});
+
+test('a second stop whose removal fails never says Nothing changed, and names the manual lines', async () => {
+  const ctx = makeCtx({ env: OWNER, okx: fakeExchange(LOSING) });
+  await planVerb(ctx, flags);
+  await planVerb(ctx, { ...flags, confirm: 'AVGPLAN' });
+  await stopVerb(ctx, { profile: 't' });
+  ctx.lines.length = 0;
+  ctx.platform = 'linux';
+  ctx.sched.crontabRead = async () => ({ code: 2, stdout: '', stderr: 'crontab: permission denied\n' });
+  assert.equal(await stopVerb(ctx, { profile: 't' }), 0);
+  const t = text(ctx);
+  assert.doesNotMatch(t, /Nothing changed/);
+  assert.match(t, /^No plan was running on profile t \(live\)\.$/m);
+  assert.match(t, /The schedule could not be removed \(crontab -l exited 2: crontab: permission denied\), so an installed entry may still fire and now buys nothing\. To take it out:/);
+  assert.match(t, /If you used crontab, delete the AvgKeeper lines/);
 });
 
 async function running() {
@@ -800,7 +833,7 @@ test('status names a stale buy lock read-only, and a time zone change with the s
   assert.match(t, /The buy lock from \d{4}-\d\d-\d\dT\d\d:\d\dZ is still held \(another AvgKeeper run, or one that crashed\)\./);
   assert.ok(t.includes(`If no AvgKeeper run is working, delete ${ctx.store.home}/buy-t-live.lock.`), t);
   assert.doesNotMatch(t, /could not buy/);
-  assert.ok(ctx.lines.includes('WARNING: this plan was made in Europe/Istanbul, but this Mac is now on Asia/Tokyo. The schedule fires at machine time, so make a new plan and run doctor again.'));
+  assert.ok(ctx.lines.includes('WARNING: this plan was made in Europe/Istanbul, but this Mac is now on Asia/Tokyo. The schedule fires at machine time, so make a new plan with AVGPLAN, which reinstalls the schedule.'));
   ctx.lines.length = 0;
   fs.rmSync(f);
   ctx.timeZone = 'Europe/Istanbul';

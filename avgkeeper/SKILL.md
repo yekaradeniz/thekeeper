@@ -17,7 +17,7 @@ Run it as `node <this skill folder>/scripts/avgkeeper.mjs <verb> ...`.
 
 1. Never run `buy` yourself, in any form except `buy --dry-run` and `buy --smoke`. It runs only from the user's own schedule, and refuses a hand run.
 2. Never type or pass `--confirm AVGPLAN` unless the user's latest message is the word AVGPLAN, in any letter case (for example `Avgplan` or `avgplan`), and nothing else, sent after they saw the plan card, with exactly the flags that card was made from. A message with other words, punctuation, a near spelling, or look-alike letters from another alphabet or fullwidth letters is not the word; never infer it from an agreement word like `ok`, `yes`, `evet` or `devam`.
-3. Never install a schedule and never edit a crontab or a LaunchAgent. `doctor` prints them; the user installs one; `buy --smoke` proves the printed line runs.
+3. Never edit a crontab or a LaunchAgent yourself. AvgKeeper installs its own schedule entry when the user confirms with AVGPLAN and removes it on `stop`; `doctor` only reads it; `buy --smoke` proves the line runs.
 4. Never set `AVGKEEPER_OWNER_TEST`, `AVGKEEPER_SCHEDULED` or any `AVGKEEPER_` variable.
 5. Never ask for, accept or repeat an API key, secret or passphrase. If the user pastes one, tell them to delete that key on the OKX website and make a new one.
 6. A REFUSED line is a finished answer. Do not look for a way around it.
@@ -62,9 +62,14 @@ buy), matching what they answered; `mail` takes one action per call, so these ar
 If question 5 was no, run `mail`. If its Level line is not `off`, an earlier plan turned mail on; mail is one
 setting for every plan on this machine, so tell the user it stops for those plans too, then run `mail --level off`.
 
-Run `plan` with those flags and show the card word for word. Only after the user's latest message is the word
-AVGPLAN and nothing else, in any letter case (rule 2), run the same command with `--confirm AVGPLAN`. Then run
-`doctor` and relay the schedule it prints.
+Run `plan` with those flags and show the card word for word. It includes a line saying that typing AVGPLAN also adds
+AvgKeeper's own schedule entry on this computer; do not drop it. If `plan` refuses the profile name because it ends
+in `.demo`, ask the user for another okx profile name. Only after the user's latest message is the word AVGPLAN and
+nothing else, in any letter case (rule 2), run the same command with `--confirm AVGPLAN`. That command also installs
+the schedule (launchd on macOS, a marked crontab entry elsewhere). Relay its receipt word for word, including the
+line that starts `Schedule installed` with any WARNING lines under it, or, when the install failed, the `FAIL:` line
+(the plan is on, the line says whether an earlier AvgKeeper entry may still run it or nothing buys until a schedule exists, WARNING lines may follow, and the command exits 1). Run `doctor` only to check, or
+when the receipt says FAIL.
 
 ## First run
 
@@ -77,11 +82,11 @@ AVGPLAN and nothing else, in any letter case (rule 2), run the same command with
 2. Build the plan card as in "Making a plan" above and confirm it with `AVGPLAN`. If `plan` refuses because this
    copy carries no AI Builder Code from OKX yet, relay that line as it is (rule 6): nothing can be bought until an
    update carries one, and nothing is wrong with the user's account.
-3. `doctor --profile <p>` prints the schedule line; the user installs it in their own crontab or launchd (rule 3,
-   this skill never installs it).
-4. Once the user says they installed it, run `buy --smoke --profile <p>` (add `--launchd` too if they used launchd
-   on macOS) to prove the printed line actually runs, and relay PASS or FAIL. It sends no order. If a notify or
-   mail command is set, it sends one test message through each.
+3. The `--confirm AVGPLAN` receipt says whether the schedule was installed (rule 3). If it says FAIL, run
+   `doctor --profile <p>`: it prints the line for the user to install themselves. Otherwise `doctor` is only a check.
+4. Run `buy --smoke --profile <p>` (add `--launchd` too when the receipt or `doctor` says launchd) to prove the
+   installed line actually runs, and relay PASS or FAIL. It sends no order. If a notify or mail command is set, it
+   sends one test message through each.
 
 ## Verbs
 
@@ -89,17 +94,17 @@ AVGPLAN and nothing else, in any letter case (rule 2), run the same command with
 |---|---|---|
 | `holdings --profile <p>` | READ | Every coin with its value, OKX's profit or loss, and whether a plan would buy it. |
 | `plan --profile <p> --budget --every --method [...]` | READ | The card: today's split, monthly spend, the risk sentence. Sends nothing. |
-| `plan ... --confirm AVGPLAN` | WRITE | Starts the plan (rule 2). Sends no order; replaces a different plan on record, or restarts the same one (same settings, same id) if it was running or halted. Can send a notice through your own notify or mail command if it closes a stale period left over from an earlier run. |
+| `plan ... --confirm AVGPLAN` | WRITE | Starts the plan (rule 2) and installs its schedule entry (launchd on macOS, a marked crontab entry elsewhere), then prints `Schedule installed (...)` or a `FAIL:` line (exit code 1). Sends no order; replaces a different plan on record, or restarts the same one (same settings, same id) if it was running or halted. Can send a notice through your own notify or mail command if it closes a stale period left over from an earlier run. |
 | `buy --profile <p>` | WRITE | The scheduled run. Only the user's own schedule runs this in full (rule 1); never run it by hand. |
 | `status --profile <p>` | READ | The running plan, recent buys and skips, a halt and its reason. |
-| `stop --profile <p>` | WRITE | Ends the plan. No typed word: stopping only lowers what the account buys. Can send a notice through your own notify or mail command if it closes a stale period left over from an earlier run. |
+| `stop --profile <p>` | WRITE | Ends the plan and removes its schedule entry (`Schedule removed.`; if removal fails it prints the commands to take the entry out by hand). No typed word: stopping only lowers what the account buys. Can send a notice through your own notify or mail command if it closes a stale period left over from an earlier run. |
 | `notify [--level off\|problems\|all]` | READ | Which lines reach the user's notify command. Default `problems`. |
 | `mail [--profile <p>]` | READ | The mail address, the level, whether a command is set, and how many notices are waiting to be sent. |
 | `mail --to <address>` / `mail --level off\|problems\|all` | READ | Sets the mail address, or the level, one action per call (the address step under Making a plan). Default level `off`: mail never starts on its own. |
 | `mail --pending --profile <p>` | READ | The notices waiting to be sent for that profile. Notices are kept per profile, so name it. |
 | `mail --sent <id> --profile <p>` | WRITE | Records one notice as sent right after you actually send it (agent rule 10). |
-| `doctor --profile <p>` | READ | Checks the setup and prints the crontab line and the launchd plist. |
-| `buy --smoke [--launchd] --profile <p>` | READ | Runs the line `doctor` prints as a dry run under the schedule's environment and says PASS or FAIL. It proves the line runs, not that it is installed; `--launchd` also checks the saved plist matches. |
+| `doctor --profile <p>` | READ | Checks the setup and reads the schedule entry, never writing it. Installed and matching the plan: `Schedule: installed (...)`. Missing or different: prints the crontab line and the launchd plist to install by hand, or says to make the plan again with AVGPLAN. With no plan, it says whether an AvgKeeper schedule entry is still installed and prints removal commands only for one that is, or when it could not tell. Exits 1 when it prints a FAIL line, for example a second AvgKeeper entry next to the installed one. |
+| `buy --smoke [--launchd] --profile <p>` | READ | Runs the schedule's buy line as a dry run under the schedule's environment and says PASS or FAIL. It proves the line runs, not that it is installed (`doctor` reads that); `--launchd` also checks the saved plist matches. |
 | `buy --dry-run --profile <p>` | READ | What a real buy would do right now, checking the same gates it would (halted, a stale buy lock, an unsettled send, not due, no coin in loss, every coin below OKX's minimum, free USDT below the budget). Sends nothing. |
 
 Type: WRITE starts, replaces or ends a plan, or records an order or a sent notice, in the ledger
@@ -120,11 +125,12 @@ OKX) when they close a period an earlier run left stale, so its money still reac
 
 ## Pause and uninstall
 
-- To stop buying without touching anything else, run `stop`. It ends the plan; the user's coins stay exactly where
-  they are.
-- To take the installed schedule out too, run `doctor`: it prints the exact commands to remove it, a `crontab -e`
-  edit or, on macOS, `launchctl bootout` followed by deleting the saved plist file, and it keeps printing them even
-  after `stop`, from the plan the user last had.
+- To stop buying without touching anything else, run `stop`. It ends the plan and removes AvgKeeper's own schedule
+  entry; the user's coins stay exactly where they are.
+- If `stop` prints that the schedule could not be removed, run `doctor`: while an entry is still installed, or
+  when it cannot tell, it prints the exact commands to remove it, a `crontab -e` edit or, on macOS,
+  `launchctl bootout` followed by deleting the saved plist file, even after `stop`. When nothing is installed it
+  says so and prints no commands.
 - Removing AvgKeeper's own records, or the skill folder itself, is not something this skill runs for the user:
   point them at `README.md`'s own "Pause and uninstall" section, which names the exact folders to delete
   (`~/.avgkeeper` and the copied skill folder) themselves.
@@ -135,6 +141,6 @@ OKX) when they close a period an earlier run left stale, so its money still reac
 - An order whose result is not known yet waits: not found on OKX yet, OKX unreachable, or still open. The next run reads it again and buys nothing new until it knows.
 - An order whose result cannot be read at all halts the plan. `status` names the orders to check in the OKX app; a new plan starts buying again.
 - At most one buy per period per profile and mode, whatever plan made it. For a daily or longer plan the period is the calendar day; for an hourly plan it is the local hour. Replacing a plan never buys twice in one period. A new hourly plan can still buy on a day a daily plan already bought. A new daily or longer plan does not buy on a day an hourly plan already bought or skipped in.
-- The schedule runs at your machine's local time. The plan records the time zone it was made in; if the Mac's time zone changes, make a new plan and run doctor again.
+- The schedule runs at your machine's local time. The plan records the time zone it was made in; if the Mac's time zone changes, make a new plan with AVGPLAN, which reinstalls the schedule.
 - Dollar stablecoins never join a plan. Coins worth under the dust threshold stay out unless named with `--only`.
 - AvgKeeper spends only the account's free USDT. Money a trading bot or another tool has already set aside is never touched, but every buy leaves less free USDT for anything else on the same account.

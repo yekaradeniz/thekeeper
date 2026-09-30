@@ -35,6 +35,18 @@ export const CLI_INSTALL = 'npm install -g @okx_ai/okx-trade-cli@1.4.6';
 export const NO_CLI_LINE = `AvgKeeper cannot reach OKX: no okx CLI was found on PATH. Install it: ${CLI_INSTALL}`;
 export const PROFILE_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 
+// A launchd label is com.avgkeeper.buy.<profile>, plus .demo for a demo plan. A profile whose own name ends in .demo
+// would therefore share a label, and a plist file, with the demo plan of the profile before the dot: profile x in
+// demo and profile x.demo live are both com.avgkeeper.buy.x.demo, and installing or stopping one would replace or
+// remove the other's schedule. A plan on such a name is refused at the card and at confirm (plan.mjs). Existing
+// labels are not renamed. Case-insensitive, so x.DEMO cannot slip past on a case-insensitive file system.
+export const DEMO_SUFFIX_NAME = /\.demo$/i;
+export function profileNameRefusal(name) {
+  if (!DEMO_SUFFIX_NAME.test(String(name))) return null;
+  const base = String(name).slice(0, -'.demo'.length);
+  return `REFUSED: a plan cannot use profile name ${name}, because a name ending in .demo gets the same launchd schedule name as ${base || 'the profile before the dot'} in demo mode (com.avgkeeper.buy.${name}), so each would replace or remove the other's schedule. Use another okx profile name.`;
+}
+
 export const refusal = (guard, msg) => ({ guard, kind: 'REFUSED', msg: `REFUSED: ${msg}` });
 
 // The one plain line for a failure a verb did not handle itself: avgkeeper.mjs's main() prints it for every verb,

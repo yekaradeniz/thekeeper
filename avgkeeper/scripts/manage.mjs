@@ -19,7 +19,7 @@ import { orderName } from './orders.mjs';
 import { rejectedLine, closeStalePeriods } from './buy.mjs';
 import { clause } from './runner.mjs';
 import { commandText } from './cmdtext.mjs';
-import { removeScheduleLines } from './schedule.mjs';
+import { removeScheduleLines, removeSchedule } from './schedule.mjs';
 import { logStatusLines } from './runlog.mjs';
 import {
   resolveSite, gSite, isNoKeySavedFailure, noKeySavedLine, readKeyConfig, keyPermRefusals,
@@ -242,15 +242,16 @@ async function stopLocked(ctx, call) {
       const n = open.length === 1 ? '1 order' : `${open.length} orders`;
       const was = open.length === 1 ? 'was' : 'were';
       ctx.out(`No plan was running on profile ${call.profile} (${modeOf(call)}), but ${n} from an earlier plan ${was} not read back yet and ${open.length === 1 ? 'is' : 'are'} now recorded as unknown. Check order(s) in the OKX app: ${open.map((s) => orderName(s.instId, s.amount, s.period, s.clOrdId)).join(', ')}.`);
-    } else {
-      ctx.out(`No plan was running on profile ${call.profile} (${modeOf(call)}). Nothing changed.`);
     }
     // Finding 12 of the release-readiness review: a user who comes back weeks later to take the schedule out gets
-    // the commands from a second stop too, from local facts only.
-    if (everHadPlan(ledger, call)) {
-      ctx.out('If a schedule line from an earlier plan is still installed, take it out:');
-      for (const l of removal) ctx.out(l);
+    // the commands from a second stop too, from local facts only. The removal runs before the sentence below is
+    // printed, because "Nothing changed." is true only when the removal found nothing to remove: a stop that then
+    // prints "Schedule removed." must not have said nothing changed one line earlier.
+    const gone = everHadPlan(ledger, call) ? await scheduleRemoval(ctx, call, removal) : null;
+    if (!open.length) {
+      ctx.out(`No plan was running on profile ${call.profile} (${modeOf(call)}).${!gone || gone.nothingRemoved ? ' Nothing changed.' : ''}`);
     }
+    if (gone) for (const l of gone.lines) ctx.out(l);
     return 0;
   }
   // Review finding (manage.mjs:199, should): plan_stopped is written FIRST, the same order halt() already uses
@@ -268,11 +269,25 @@ async function stopLocked(ctx, call) {
   await closeStalePeriods(ctx, call, plan);
   ctx.out(`Plan ${plan.id} is stopped. Nothing more is bought. Your coins stay where they are.`);
   if (open.length) ctx.out(`The result of ${open.length === 1 ? '1 order' : `${open.length} orders`} was not read back yet and is recorded as unknown. Check order(s) in the OKX app: ${open.map((s) => orderName(s.instId, s.amount, s.period, s.clOrdId)).join(', ')}.`);
-  // Review finding (manage.mjs:175): the code never checked whether a schedule line was ever installed at all
-  // (the no-plan branch above already words this correctly, "If a schedule line ... is still installed").
-  ctx.out('If you installed a schedule line, it still runs and now buys nothing. To take it out:');
-  for (const l of removal) ctx.out(l);
+  for (const l of (await scheduleRemoval(ctx, call, removal)).lines) ctx.out(l);
   return 0;
+}
+
+// AvgKeeper takes its own schedule entry out (schedule.mjs's removeSchedule, the one writer) and answers the lines to
+// print, so the caller decides where they go. Only a failure falls back to the manual lines, because then the entry
+// may still be installed and firing for nothing. nothingRemoved is true only for a clean "found nothing".
+async function scheduleRemoval(ctx, call, removal) {
+  const r = await removeSchedule(ctx, call);
+  if (r.ok) {
+    return {
+      nothingRemoved: !r.removed,
+      lines: [r.removed ? 'Schedule removed.' : 'No AvgKeeper schedule entry was found for this profile, so there was nothing to remove.'],
+    };
+  }
+  return {
+    nothingRemoved: false,
+    lines: [`The schedule could not be removed (${r.reason}), so an installed entry may still fire and now buys nothing. To take it out:`, ...removal],
+  };
 }
 
 export async function notifyVerb(ctx, o) {

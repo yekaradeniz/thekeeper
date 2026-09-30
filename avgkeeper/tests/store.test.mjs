@@ -21,7 +21,7 @@ test('displayHomePath shows ~/.avgkeeper only for the real default home, the ful
   const real = path.join(os.homedir(), '.avgkeeper');
   assert.equal(displayHomePath(real), '~/.avgkeeper');
   assert.equal(displayHomePath(real, 'ledger.jsonl'), '~/.avgkeeper/ledger.jsonl');
-  assert.equal(displayHomePath('/opt/flora/avgkeeper', 'ledger.jsonl'), '/opt/flora/avgkeeper/ledger.jsonl');
+  assert.equal(displayHomePath('/opt/data/avgkeeper', 'ledger.jsonl'), '/opt/data/avgkeeper/ledger.jsonl');
   assert.equal(displayHomePath('/tmp/ak-store-xyz'), '/tmp/ak-store-xyz');
 });
 

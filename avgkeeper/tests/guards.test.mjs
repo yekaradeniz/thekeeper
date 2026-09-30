@@ -117,7 +117,7 @@ test('preflight refuses first on a ledger a newer AvgKeeper already wrote to', a
 });
 
 test('profile names are plain words', () => {
-  assert.ok(PROFILE_NAME.test('yunusdemo'));
+  assert.ok(PROFILE_NAME.test('mydemo'));
   assert.ok(!PROFILE_NAME.test('a b'));
 });
 

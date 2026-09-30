@@ -960,7 +960,7 @@ test('a missing okx CLI skips with the same sentence the dry run already uses, n
   // trigger this reason is really about (an nvm or Homebrew upgrade that moved the CLI, or node, out from under a
   // schedule line installed against the old path) is exactly what doctor's own scheduleRisks already fixes;
   // reinstalling the CLI alone does not reinstall the schedule line, so that step is named too.
-  assert.equal(last.reason, 'cannot reach OKX: no okx CLI was found on PATH. Install it: npm install -g @okx_ai/okx-trade-cli@1.4.6. If a node or okx upgrade moved it, run doctor again and reinstall the schedule line it prints.');
+  assert.equal(last.reason, 'cannot reach OKX: no okx CLI was found on PATH. Install it: npm install -g @okx_ai/okx-trade-cli@1.4.6. If a node or okx upgrade moved it, make the plan again with AVGPLAN, which reinstalls the schedule.');
   assert.doesNotMatch(last.reason, /OKX could not be read/);
   assert.doesNotMatch(last.reason, /^AvgKeeper/);
   assert.match(ctx.notified.at(-1), /skipped 2026-10-05/);
@@ -1570,7 +1570,7 @@ test('a Mac on another time zone than the plan is warned on buy, and due is stil
   const ctx = await withPlan(okx, {}, { notify: 'cat', notifyLevel: 'problems' });
   ctx.timeZone = 'America/New_York';
   assert.equal(await buyVerb(ctx, { profile: 't' }), 0);
-  const w = 'WARNING: this plan was made in Europe/Istanbul, but this Mac is now on America/New_York. The schedule fires at machine time, so make a new plan and run doctor again.';
+  const w = 'WARNING: this plan was made in Europe/Istanbul, but this Mac is now on America/New_York. The schedule fires at machine time, so make a new plan with AVGPLAN, which reinstalls the schedule.';
   assert.ok(ctx.lines.includes(`AvgKeeper: ${w}`), 'the screen shows the same line the notify command gets');
   assert.equal(ctx.notified[0], `AvgKeeper: ${w}`);
   assert.equal(places(okx).length, 2);

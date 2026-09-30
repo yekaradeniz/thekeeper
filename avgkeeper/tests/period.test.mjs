@@ -321,7 +321,7 @@ test('missingPeriods excludes the creation day when the plan started after that 
 test('missingPeriods counts every due day with no record, for a schedule that never ran', () => {
   const now = Date.UTC(2026, 9, 5, 7, 0) + 16 * 60000; // 10:16 Istanbul, past the grace window: Oct 1-5, all due, none recorded
   assert.equal(missingPeriods(dead, [], now), 5);
-  assert.equal(missingPeriodsWarning([], dead, now), 'WARNING: 5 due periods have no record since it started. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule line may be gone. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded.');
+  assert.equal(missingPeriodsWarning([], dead, now), 'WARNING: 5 due periods have no record since it started. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule entry may be gone. Ask your agent for doctor: it reads whether AvgKeeper\'s schedule entry is installed and matches this plan.');
 });
 
 // Review finding (period.mjs:349, should): "Run doctor to check it is still installed" sent the user back to
@@ -332,7 +332,8 @@ test('missingPeriodsWarning never promises that doctor can check whether the lin
   const now = Date.UTC(2026, 9, 5, 7, 0) + 16 * 60000;
   const w = missingPeriodsWarning([], dead, now);
   assert.doesNotMatch(w, /Run doctor to check it is still installed/);
-  assert.match(w, /AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded\./);
+  assert.match(w, /Ask your agent for doctor: it reads whether AvgKeeper's schedule entry is installed and matches this plan\./);
+  assert.doesNotMatch(w, /line doctor prints/);
 });
 
 // A run recorded a minute after its own trigger (realistic: the job takes a moment to execute and append) must
@@ -343,7 +344,7 @@ test('missingPeriods counts only what is actually missing after a run, even when
   }));
   const now = Date.UTC(2026, 9, 5, 7, 0) + 16 * 60000; // 10:16 Istanbul, past the grace window
   assert.equal(missingPeriods(dead, ledger, now), 2);
-  assert.equal(missingPeriodsWarning(ledger, dead, now), 'WARNING: 2 due periods have no record since it last ran. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule line may be gone. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded.');
+  assert.equal(missingPeriodsWarning(ledger, dead, now), 'WARNING: 2 due periods have no record since it last ran. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule entry may be gone. Ask your agent for doctor: it reads whether AvgKeeper\'s schedule entry is installed and matches this plan.');
 });
 
 // Mutation review (2026-09-28), finding period.mjs:282, later: SURVIVED r5-missing-from-plan-start
@@ -403,7 +404,7 @@ test('missingPeriodsWarning names a stale buy lock instead of blaming the schedu
   // Without the flag, the honest two-cause sentence stands unchanged.
   assert.equal(
     missingPeriodsWarning([], dead, now, false),
-    'WARNING: 5 due periods have no record since it started. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule line may be gone. AvgKeeper cannot see your crontab or launchd; check that the line doctor prints is still in crontab -l, or that the launchd job is still loaded.',
+    'WARNING: 5 due periods have no record since it started. AvgKeeper cannot tell why: the computer may have been asleep or off at the buy time (crontab skips those), or the schedule entry may be gone. Ask your agent for doctor: it reads whether AvgKeeper\'s schedule entry is installed and matches this plan.',
   );
 });
 

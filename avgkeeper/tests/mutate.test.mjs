@@ -61,6 +61,28 @@ test('mutate.mjs still runs as a script when invoked directly, sweep included', 
   assert.match(r.stderr, /no mutant with id "no-such-mutant-id"/);
 });
 
+// A mutant whose search text no longer occurs exactly once in its file cannot be graded: mutate.mjs's applyMutant
+// throws, the run reports an ERROR, and the defence that mutant stood for goes unchecked. Three ids went stale this
+// way when the stop code was rewritten (2026-09-30). Counted the way applyMutant counts (split on the search text),
+// for every entry, so the next rewrite fails here in the ordinary suite instead of in a forty-minute catalog run.
+test('every catalog entry\'s search text occurs exactly once in its file, and ids are unique', { skip: !present }, () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const catalog = JSON.parse(fs.readFileSync(path.join(root, 'tools', 'mutants.json'), 'utf8'));
+  assert.ok(catalog.length > 200, `the catalog holds ${catalog.length} entries`);
+  const bad = [];
+  const seen = new Set();
+  const files = new Map();
+  for (const m of catalog) {
+    if (seen.has(m.id)) bad.push(`${m.id}: duplicate id`);
+    seen.add(m.id);
+    if (!files.has(m.file)) files.set(m.file, fs.readFileSync(path.join(root, m.file), 'utf8'));
+    const count = files.get(m.file).split(m.search).length - 1;
+    if (count !== 1) bad.push(`${m.id}: search text found ${count} time(s) in ${m.file}, need exactly 1`);
+    if (m.replace === m.search) bad.push(`${m.id}: replace equals search, so the mutant changes nothing`);
+  }
+  assert.deepEqual(bad, []);
+});
+
 test('importing tools/mutate.mjs for its exports never triggers a full mutation run', { skip: !present }, () => {
   // Reaching this line at all, in well under a second, is the proof: a triggered run would spawn npm test inside
   // a temp copy of the whole suite and take on the order of a minute.

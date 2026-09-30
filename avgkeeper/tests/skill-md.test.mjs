@@ -44,7 +44,6 @@ test('SKILL.md keeps the money rules', () => {
   const s = read('SKILL.md');
   assert.match(s, /Never run `buy` yourself/);
   assert.match(s, /Never type or pass `--confirm AVGPLAN` unless the user's latest message is the word AVGPLAN, in any letter case/);
-  assert.match(s, /Never install a schedule/);
   assert.match(s, /Never set `AVGKEEPER_OWNER_TEST`/);
   assert.match(s, /Ask the user for each of these/);
 });
@@ -205,7 +204,49 @@ test('SKILL.md has a First run section that ends in proving the schedule with bu
   const firstRun = s.indexOf('## First run');
   const verbs = s.indexOf('## Verbs');
   assert.ok(firstRun > -1 && verbs > -1 && firstRun < verbs, 'First run sits before the Verbs table');
-  assert.ok(s.includes('Once the user says they installed it, run `buy --smoke --profile <p>` (add `--launchd` too if they used launchd on macOS) to prove the printed line actually runs'));
+  assert.ok(s.includes('Run `buy --smoke --profile <p>` (add `--launchd` too when the receipt or `doctor` says launchd) to prove the installed line actually runs'));
+});
+
+// 2026-09-30: AVGPLAN installs the schedule and stop removes it. The agent still never edits a crontab or a
+// LaunchAgent itself. The old wording ("Never install a schedule", "the user installs one") must not come back.
+test('SKILL.md rule 3: AvgKeeper installs its own schedule on AVGPLAN, removes it on stop, doctor only reads', () => {
+  const s = norm(read('SKILL.md'));
+  assert.ok(s.includes('3. Never edit a crontab or a LaunchAgent yourself. AvgKeeper installs its own schedule entry when the user confirms with AVGPLAN and removes it on `stop`; `doctor` only reads it; `buy --smoke` proves the line runs.'));
+  assert.doesNotMatch(s, /Never install a schedule/);
+  assert.doesNotMatch(s, /the user installs one/);
+  assert.doesNotMatch(s, /this skill never installs it/);
+  assert.ok(s.includes('Relay its receipt word for word, including the line that starts `Schedule installed` with any WARNING lines under it, or, when the install failed, the `FAIL:` line'));
+  assert.ok(s.includes('It includes a line saying that typing AVGPLAN also adds AvgKeeper\'s own schedule entry on this computer; do not drop it.'));
+  assert.ok(s.includes('If `plan` refuses the profile name because it ends in `.demo`, ask the user for another okx profile name.'));
+  assert.ok(s.includes('If `stop` prints that the schedule could not be removed, run `doctor`'));
+  assert.doesNotMatch(s, /run doctor again|installed a line by hand|line `doctor` prints/);
+  assert.ok(s.includes('Run `doctor` only to check, or when the receipt says FAIL.'));
+  assert.ok(s.includes('It ends the plan and removes AvgKeeper\'s own schedule entry'));
+});
+
+test('README.md says AVGPLAN installs the schedule and stop removes it', () => {
+  const r = norm(read('README.md'));
+  assert.ok(r.includes('Typing AVGPLAN to confirm a plan installs it for you'));
+  assert.ok(r.includes('The receipt shows a `Schedule installed` line'));
+  // The receipt prints "Schedule installed (<scheduler>): ...", never "Schedule installed:" (plan.mjs).
+  assert.ok(!r.includes('`Schedule installed:`'));
+  assert.ok(!r.includes('The receipt ends with `Schedule installed`'));
+  assert.ok(r.includes('it shows a `FAIL:` line instead, which says whether an earlier AvgKeeper entry may still run the plan; then ask your agent for `doctor`, which prints the line to install by hand.'));
+  assert.ok(r.includes('If `stop` prints that the schedule could not be removed, ask your agent for `doctor`'));
+  assert.doesNotMatch(r, /you installed a line by hand/);
+  assert.ok(r.includes('removes the schedule entry AvgKeeper installed (`Schedule removed.`)'));
+  assert.doesNotMatch(r, /this skill never installs a schedule/);
+  assert.doesNotMatch(r, /yourself: this skill/);
+});
+
+// Every string the docs quote from the code's receipts must still be in the code.
+test('the receipt strings the docs quote exist in the code', () => {
+  const plan = read('scripts/plan.mjs');
+  const manage = read('scripts/manage.mjs');
+  const sched = read('scripts/schedule.mjs');
+  assert.ok(plan.includes('Schedule installed (') && plan.includes('FAIL: the plan is on, but AvgKeeper could not install its schedule'));
+  assert.ok(manage.includes('Schedule removed.') && manage.includes('The schedule could not be removed'));
+  assert.ok(sched.includes('Schedule: installed ('));
 });
 
 // Finding 14 of the 2026-09-27 release-readiness review: an agent with only SKILL.md had no setup path, and to find
@@ -255,7 +296,7 @@ test('SKILL.md has a Pause and uninstall section', () => {
   const s = norm(read('SKILL.md'));
   assert.ok(s.includes('## Pause and uninstall'));
   assert.ok(s.includes('To stop buying without touching anything else, run `stop`.'));
-  assert.ok(s.includes('it keeps printing them even after `stop`, from the plan the user last had.'));
+  assert.ok(s.includes('even after `stop`. When nothing is installed it says so and prints no commands.'));
   assert.ok(s.includes('`README.md`\'s own "Pause and uninstall" section'));
 });
 

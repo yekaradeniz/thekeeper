@@ -58,7 +58,7 @@ function skipReason(e) {
   // alone does not fix the realistic trigger this comment already names (an nvm or Homebrew upgrade that moved
   // node or the CLI out from under a schedule line installed against the old path); doctor's own scheduleRisks
   // already names the actual fix, so it is named here too.
-  if (e.kind === 'missing') return `${NO_CLI_LINE.replace(/^AvgKeeper /, '')}. If a node or okx upgrade moved it, run doctor again and reinstall the schedule line it prints.`;
+  if (e.kind === 'missing') return `${NO_CLI_LINE.replace(/^AvgKeeper /, '')}. If a node or okx upgrade moved it, make the plan again with AVGPLAN, which reinstalls the schedule.`;
   return `OKX could not be read (${reasonOf(e)}).`;
 }
 

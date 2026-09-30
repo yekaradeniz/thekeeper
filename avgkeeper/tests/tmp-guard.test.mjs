@@ -5,7 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { OWN_TEMP, sweepStale, STALE_MS } from './tmp-guard.mjs';
+import {
+  OWN_TEMP, sweepStale, sweepHomeDecoys, STALE_MS,
+} from './tmp-guard.mjs';
 import { AK_ROOT, withoutComments } from './helpers.mjs';
 
 const GUARD = path.join(AK_ROOT, 'tests', 'tmp-guard.mjs');
@@ -68,6 +70,32 @@ test('every mkdtempSync prefix in tests and tools matches OWN_TEMP', () => {
       assert.ok(OWN_TEMP.test(`${m[1]}abcdef`), `${path.basename(f)} uses prefix ${m[1]}`);
     }
   }
+});
+
+// tests/sched-guard.test.mjs makes `.ak-guard-files-*` decoys directly under the real home. A killed process would
+// leave one forever, so the guard sweeps old ones on load. Tested against a fake home in the temp folder: no folder
+// is created in the real home for this test.
+test('the home sweep removes an old .ak-guard-files- folder and leaves a fresh one, a foreign name and a file', () => {
+  const box = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-box-'));
+  const old = path.join(box, '.ak-guard-files-old');
+  const young = path.join(box, '.ak-guard-files-young');
+  const foreign = path.join(box, '.other-old');
+  const plain = path.join(box, '.ak-guard-files-afile');
+  for (const d of [old, young, foreign]) fs.mkdirSync(d);
+  fs.mkdirSync(path.join(old, 'deeper'));
+  fs.writeFileSync(plain, 'x');
+  const past = (Date.now() - STALE_MS - 1000) / 1000;
+  for (const p of [old, foreign, plain]) fs.utimesSync(p, past, past);
+  assert.equal(sweepHomeDecoys(box), 1);
+  assert.deepEqual(fs.readdirSync(box).sort(), ['.ak-guard-files-afile', '.ak-guard-files-young', '.other-old']);
+  assert.equal(sweepHomeDecoys(path.join(box, 'no-such-home')), 0, 'a home that cannot be opened is not an error');
+});
+
+// A sweep nobody calls protects nothing, and no test can point the load-time call at a fake home, so the call itself
+// is pinned in the source: a top-level statement in tmp-guard.mjs, outside every comment.
+test('tmp-guard.mjs calls the home sweep when it loads', () => {
+  const src = withoutComments(fs.readFileSync(GUARD, 'utf8'));
+  assert.match(src, /^sweepHomeDecoys\(\);$/m);
 });
 
 // Review finding (cards.test.mjs:1): this guard's own header says every test file loads it directly, but nothing

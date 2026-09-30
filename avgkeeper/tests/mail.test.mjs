@@ -45,9 +45,9 @@ test('a mail block of the wrong shape reads as absent; level defaults to off, ne
 // ---------------------------------------------------------------------------
 
 test('an address is accepted only in the shape that can reach one person', () => {
-  assert.equal(mailAddressRefusal('yunus@example.com'), null);
+  assert.equal(mailAddressRefusal('alex@example.com'), null);
   assert.equal(mailAddressRefusal('a.b+tag@mail.example.co.uk'), null);
-  for (const bad of ['', '   ', 'yunus', 'yunus@', '@example.com', 'yunus@example', 'a@b@c.com',
+  for (const bad of ['', '   ', 'alex', 'alex@', '@example.com', 'alex@example', 'a@b@c.com',
     'a b@example.com', 'a@example..com', 'a@.example.com', 'a@example.com.', 'a@x.com,b@y.com', 'a@x.com;b@y.com']) {
     assert.ok(mailAddressRefusal(bad), `${JSON.stringify(bad)} must be refused`);
   }
@@ -85,7 +85,7 @@ test('a mail.to in config.json that fails the address check reads as no address,
 });
 
 test('every refusal names the address it refused, so the typo is visible', () => {
-  assert.match(mailAddressRefusal('yunus@example'), /"yunus@example"/);
+  assert.match(mailAddressRefusal('alex@example'), /"alex@example"/);
   assert.match(mailAddressRefusal('a@x.com,b@y.com'), /comma or a semicolon/);
   assert.match(mailAddressRefusal(''), /AvgKeeper never guesses one/);
 });
@@ -458,14 +458,14 @@ test('mail --to and --level change only their own key and never write mail.comma
 
 test('the address is recorded exactly as typed and read back in full, and a bad one is refused by name', async () => {
   const ctx = makeCtx({});
-  assert.equal(await run(ctx, { to: 'Yunus.K@Example.com' }), 0);
-  assert.equal(ctx.lines[0], 'Mail address recorded: Yunus.K@Example.com', 'never lowercased');
-  assert.equal(mailConfig(ctx.store.readConfig()).to, 'Yunus.K@Example.com');
+  assert.equal(await run(ctx, { to: 'Alex.K@Example.com' }), 0);
+  assert.equal(ctx.lines[0], 'Mail address recorded: Alex.K@Example.com', 'never lowercased');
+  assert.equal(mailConfig(ctx.store.readConfig()).to, 'Alex.K@Example.com');
 
   ctx.lines.length = 0;
   assert.equal(await run(ctx, { to: 'not-an-address' }), 1);
   assert.match(ctx.lines[0], /^REFUSED: /);
-  assert.equal(mailConfig(ctx.store.readConfig()).to, 'Yunus.K@Example.com', 'a refused address does not replace a good one');
+  assert.equal(mailConfig(ctx.store.readConfig()).to, 'Alex.K@Example.com', 'a refused address does not replace a good one');
 });
 
 test('the level is one of off, problems or all; an unknown value is refused and changes nothing', async () => {

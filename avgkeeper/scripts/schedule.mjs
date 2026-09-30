@@ -1,6 +1,7 @@
 // avgkeeper/scripts/schedule.mjs
-// The user's schedule. AvgKeeper installs nothing and edits no crontab: doctor prints the line and the plist, the
-// user installs one, buy --smoke proves the printed line runs. The shapes follow GridKeeper's verbs.mjs, ledger-view.mjs and check.mjs.
+// The user's schedule. Since 2026-09-30 AvgKeeper installs its own entry on AVGPLAN and removes it on stop (see the
+// end of this file); doctor reads it and, when it is missing or differs, prints the line and the plist to install
+// by hand, and buy --smoke proves the printed line runs. The shapes follow GridKeeper's verbs.mjs, ledger-view.mjs and check.mjs.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,7 @@ import {
   isOwnerTest, OWNER_TEST_ENV, CLI_INSTALL, preflight, builderDisclosure, keyInactivityWarning, failureLine,
 } from './guards.mjs';
 import {
-  activePlan, tornWarning, noPlanTornCaveat, staleLockLine, timeZoneWarning, haltedLine, waitingLine, everHadPlan,
+  modeOf, activePlan, tornWarning, noPlanTornCaveat, staleLockLine, timeZoneWarning, haltedLine, waitingLine, everHadPlan,
 } from './planview.mjs';
 import { readConfigSafe, notifyStatusLine } from './notify.mjs';
 import {
@@ -118,9 +119,9 @@ export const launchdPlistPath = (o, realHome = os.homedir()) => path.join(realHo
 // again at the next login, so the rm is part of the same fact. Local facts only: no okx CLI and no OKX call.
 export function launchdRemoveLines(o, realHome = os.homedir()) {
   const plist = shWord(launchdPlistPath(o, realHome));
-  return [`launchctl bootout gui/$(id -u) ${plist}`, `rm ${plist}`];
+  return [`launchctl bootout gui/$(id -u)/${launchdLabel(o)}`, `rm ${plist}`];
 }
-export const CRONTAB_REMOVE = 'delete the AvgKeeper line from your crontab yourself (crontab -e)';
+export const CRONTAB_REMOVE = 'delete the AvgKeeper lines from your crontab yourself (crontab -e): the "# avgkeeper" comment and the line under it';
 // The removal sentences stop and doctor print once no plan needs the schedule: launchd's two commands on macOS,
 // the crontab edit everywhere.
 export function removeScheduleLines(o, platform, realHome) {
@@ -204,6 +205,10 @@ export function runChild(file, args, { input = '', timeoutMs = SMOKE_TIMEOUT_MS,
       child.unref();
       resolve({ code: null, stdout, stderr, timedOut: true });
     }, timeoutMs);
+    // setEncoding, not `+= chunk`: each Buffer chunk decoded alone turns a multi-byte character split across two reads
+    // into U+FFFD, and a crontab read this way is written back to the user with their own text corrupted.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     child.stdin.on('error', () => {});
@@ -247,6 +252,9 @@ export async function doctorVerb(ctx, o) {
   const { config, line } = readConfigSafe(ctx.store);
   if (line) ctx.out(`FAIL: ${line}`);
   else ctx.out(notifyStatusLine(config));
+  // Exit 1 whenever any FAIL line was printed above or below: the preflight refusals and this config line are the two
+  // printed before the plan is read; the later ones return 1 at their own print.
+  const failed = () => pre.refusals.length > 0 || Boolean(line);
   const ledger = ctx.store.readLedger();
   const mail = mailStatus(ctx.store, ledger, call);
   ctx.out(mail.line);
@@ -262,23 +270,40 @@ export async function doctorVerb(ctx, o) {
     // nothing telling the user how to take it out. Finding 12 of the release-readiness review: a launchd plist
     // still saved for this profile gets them too, even with an empty or deleted ledger.
     const plistPath = launchdPlistPath(call, ctx.realHome);
+    // The removal commands are printed only for an entry that is there or whose state could not be read: a
+    // profile with nothing installed is told so, instead of being handed commands for nothing (rule 2, never state
+    // what the code did not check).
+    const entry = await readEntryPresence(ctx, call);
+    const noEntry = `No AvgKeeper schedule entry is installed for profile ${call.profile} (${modeOf(call)}).`;
+    const unreadable = entry.state === 'unknown' ? `AvgKeeper could not tell whether a schedule entry is installed (${entry.detail}). If one is, take it out so it stops firing for nothing:` : null;
     // Review finding (manage.mjs:199 area, later): the same caveat status and holdings now carry, for the same
     // reason: a torn line could have been the very plan_active this profile never showed as running. Printed as
     // its own line for the two branches below (each ends its own sentence in a colon, introducing the removal
     // commands that follow), appended in place for the plain "No plan yet" sentence.
     const caveat = noPlanTornCaveat(ledger);
     if (everHadPlan(ledger, call)) {
-      ctx.out('No plan is running now (it was stopped or replaced). If a schedule line is still installed from an earlier plan, take it out so it stops firing for nothing:');
+      if (entry.state === 'none') {
+        ctx.out(`No plan is running now (it was stopped or replaced). ${noEntry}`);
+        if (caveat) ctx.out(caveat.trim());
+        return failed() ? 1 : 0;
+      }
+      ctx.out(entry.state === 'found'
+        ? 'No plan is running now (it was stopped or replaced), but an AvgKeeper schedule entry from an earlier plan is still installed. Take it out so it stops firing for nothing:'
+        : `No plan is running now (it was stopped or replaced). ${unreadable}`);
       if (caveat) ctx.out(caveat.trim());
-    } else if (platform === 'darwin' && fs.existsSync(plistPath)) {
-      ctx.out(`No plan is on record for profile ${call.profile}, but a launchd plist for it is still saved at ${plistPath}. Take the schedule out so it stops firing for nothing:`);
+    } else if (entry.state === 'found') {
+      ctx.out(platform === 'darwin' && entry.plistSaved
+        ? `No plan is on record for profile ${call.profile}, but a launchd plist for it is still saved at ${plistPath}. Take the schedule out so it stops firing for nothing:`
+        : `No plan is on record for profile ${call.profile}, but an AvgKeeper schedule entry for it is still installed. Take it out so it stops firing for nothing:`);
       if (caveat) ctx.out(caveat.trim());
+    } else if (entry.state === 'unknown') {
+      ctx.out(`No plan yet: make one with AVGPLAN. ${unreadable}${caveat}`);
     } else {
-      ctx.out(`No plan yet. The schedule line depends on the plan time, so make a plan first.${caveat}`);
-      return pre.refusals.length ? 1 : 0;
+      ctx.out(`No plan yet: make one with AVGPLAN. ${noEntry}${caveat}`);
+      return failed() ? 1 : 0;
     }
     for (const l of removeScheduleLines(call, platform, ctx.realHome)) ctx.out(l);
-    return pre.refusals.length ? 1 : 0;
+    return failed() ? 1 : 0;
   }
   ctx.out(lastRunLine(ledger, plan));
   const missing = missingPeriodsWarning(ledger, plan, ctx.now(), Boolean(stale));
@@ -298,10 +323,10 @@ export async function doctorVerb(ctx, o) {
   if (plan.halted) {
     // Review finding (schedule.mjs:292, later): haltedLine, printed just above, already ends "Nothing is bought
     // until you make a new plan."; repeating that exact clause here said the same thing twice in two lines.
-    ctx.out('Make one first, then run doctor again for its schedule line.');
+    ctx.out('Make a new plan with AVGPLAN; it replaces this schedule entry.');
     ctx.out('If a schedule line from before is still installed, it now buys nothing. To take it out:');
     for (const l of removeScheduleLines(call, platform, ctx.realHome)) ctx.out(l);
-    return pre.refusals.length ? 1 : 0;
+    return failed() ? 1 : 0;
   }
   const env = ctx.env || {};
   const cron = buySchedule(env, o, plan);
@@ -310,13 +335,31 @@ export async function doctorVerb(ctx, o) {
     return 1;
   }
   for (const risk of scheduleRisks(cron, { platform, realHome: ctx.realHome })) ctx.out(risk);
-  const planCadence = parseCadence(plan.cadence);
-  const planHourly = Boolean(planCadence && planCadence.kind === 'hour');
-  const scheduleWord = planHourly
-    ? `every hour at ${plan.at} machine time`
-    : `daily at ${plan.at} machine time and buys only on the plan's buy days`;
-  ctx.out(`Schedule: the buy runs ${scheduleWord}. Install one of these yourself.`);
-  ctx.out('Option 1, crontab (skips a run while the Mac sleeps). Run crontab -e and add this line:');
+  // AVGPLAN installs the entry itself (installSchedule); doctor only reads whether it is there and matches this plan,
+  // and never writes. Installed: no install instructions, just the proof command.
+  const state = await readScheduleState(ctx, call, plan);
+  if (state.state === 'installed') {
+    ctx.out(`Schedule: installed (${viaPhrase(state.via)}${state.byHand ? '; this crontab line was added by hand, not by AVGPLAN' : ''}). ${scheduleWakes(plan)}. Each run's full output is appended to ${cron.logPath}; status and doctor show its last lines when the last one does not read like an ordinary finish.`);
+    // The entry matches the plan, but a second one next to it fires too: a problem, not a pass.
+    const problems = state.problems || [];
+    for (const p of problems) ctx.out(`FAIL: ${p}`);
+    ctx.out(`To prove it runs under the schedule's own environment: ${shWord(cron.node)} ${shWord(cron.script)} ${['buy', '--smoke', ...(state.via === 'launchd' ? ['--launchd'] : []), '--profile', o.profile, ...(o.demo ? ['--demo'] : [])].join(' ')}`);
+    ctx.out('If you change the plan time later, make the plan again with AVGPLAN and the entry is replaced.');
+    return failed() || problems.length ? 1 : 0;
+  }
+  // unknown: the read itself failed, so neither "installed" nor "missing" is a fact. Said so, then the manual lines.
+  const unknown = state.state === 'unknown' ? `AvgKeeper could not tell whether an entry is installed (${state.detail}). If none is, install` : null;
+  const different = state.state === 'different';
+  if (different) {
+    ctx.out(`Schedule: an entry is installed (${viaPhrase(state.via)}) but it differs from this plan. Make the plan again with AVGPLAN, which replaces it.`);
+    ctx.out(`Or install the plan's schedule by hand (${scheduleWakes(plan)}). Install one of these yourself.`);
+  } else {
+    ctx.out(`Schedule: ${scheduleWakes(plan)}. ${unknown || 'Install'} one of these yourself.`);
+    ctx.out('Or ask your agent to make the plan again with AVGPLAN, which installs it.');
+  }
+  ctx.out(different
+    ? 'Option 1, crontab (skips a run while the Mac sleeps). Run crontab -e, delete the old AvgKeeper lines (the "# avgkeeper" comment and the line under it), then add this line:'
+    : 'Option 1, crontab (skips a run while the Mac sleeps). Run crontab -e and add this line:');
   ctx.out(cron.line);
   if (platform === 'darwin') {
     const l = launchdConfig(env, o, plan, ctx.realHome);
@@ -343,8 +386,7 @@ export async function doctorVerb(ctx, o) {
   const proveCmd = (launchd) => `${shWord(cron.node)} ${shWord(cron.script)} ${smokeArgs(launchd).join(' ')}`;
   ctx.out(`Then prove it: ${proveCmd(false)}`);
   if (platform === 'darwin') ctx.out(`With launchd: ${proveCmd(true)}`);
-  ctx.out('If you change the plan time later, run doctor again and replace the line.');
-  return pre.refusals.length ? 1 : 0;
+  return failed() ? 1 : 0;
 }
 
 // Item 9 of the 2026-09-27 release audit: what can quietly break a schedule that works today, named right where
@@ -369,7 +411,7 @@ export function scheduleRisks(cron, { platform, realHome } = {}) {
     }
   }
   for (const p of [cron.node, cron.okx].filter(Boolean)) {
-    if (VERSIONED_PATH.test(p)) out.push(`The schedule names ${tildeOf(p, realHome)}, which has a version number in it: after you upgrade node or the okx CLI, run doctor again and reinstall the schedule line it prints.`);
+    if (VERSIONED_PATH.test(p)) out.push(`The schedule names ${tildeOf(p, realHome)}, which has a version number in it: after you upgrade node or the okx CLI, make the plan again with AVGPLAN, which reinstalls the schedule.`);
   }
   return out;
 }
@@ -380,11 +422,11 @@ function savedPlistProblem(form) {
   try {
     saved = fs.readFileSync(form.plistPath, 'utf8');
   } catch (e) {
-    if (e.code === 'ENOENT') return `the launchd plist is not saved yet at ${form.plistPath}. Save the plist doctor prints there and load it.`;
+    if (e.code === 'ENOENT') return `the launchd plist is not saved yet at ${form.plistPath}. Make the plan again with AVGPLAN, which saves and loads it.`;
     return `the launchd plist at ${form.plistPath} could not be read (${e.code || e.message}).`;
   }
   // An editor's trailing newline is not a difference; anything else is.
-  if (saved.trimEnd() !== form.plist.trimEnd()) return 'the saved plist differs from the one doctor prints now; save the new one and load it again.';
+  if (saved.trimEnd() !== form.plist.trimEnd()) return 'the saved plist differs from the one this plan needs; make the plan again with AVGPLAN, which replaces it.';
   return null;
 }
 
@@ -490,7 +532,7 @@ export async function smokeVerb(ctx, o) {
     ctx.out(`To run the same test yourself: ${cmd}`);
     return 1;
   }
-  ctx.out(`PASS: the ${form.via} line doctor prints runs: the buy ran as a dry run under ${form.via}'s environment. This does not check that the line is installed.`);
+  ctx.out(`PASS: the ${form.via} schedule line runs: the buy ran as a dry run under ${form.via}'s environment. This does not check that the line is installed.`);
   if (config.notify) {
     const n = await ctx.runChild('/usr/bin/env', ['-i', ...words, '/bin/sh', '-c', config.notify], { input: `${SMOKE_LINE}\n`, timeoutMs: SMOKE_NOTIFY_TIMEOUT_MS, detached: true });
     if (n.timedOut || n.code !== 0) {
@@ -533,4 +575,429 @@ export async function smokeVerb(ctx, o) {
     ctx.out(`No mail command is set, so each mail notice waits in ${commandText(`mail --pending --profile ${o.profile}${o.demo ? ' --demo' : ''}`)} until you ask your agent to send it.`);
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The schedule entry AvgKeeper installs and removes itself (2026-09-30: AVGPLAN is the whole job). One place:
+// plan --confirm installs, stop removes, doctor reads, all through the functions below (rule 3, one fact one
+// reader). Every command goes through ctx.sched, never a real binary directly, so a test context that forgets to wire
+// the fake fails loudly instead of editing the developer's crontab or LaunchAgents.
+// ---------------------------------------------------------------------------------------------------------------
+const SCHED_TIMEOUT_MS = 15000;
+
+// The real ctx.sched. uid is the launchd domain (gui/<uid>); null where the platform has none, which only the
+// darwin path reads.
+//
+// Test guard (2026-09-30 incident: a test spawned the entry script before its stubs were on PATH, and a real launchd
+// job was bootstrapped into the developer's session). tests/tmp-guard.mjs sets AVGKEEPER_TEST_GUARD=1 in every test
+// process and children inherit it. While it is set, a bare `crontab` or `launchctl` is never looked up on PATH: the
+// binaries run only from the absolute directory named by AVGKEEPER_SCHED_BIN_DIR, and with no such directory every
+// call returns a failure result without spawning anything.
+const GUARD_REFUSAL = { code: 126, stdout: '', stderr: 'a test tried to reach the real scheduler (AVGKEEPER_TEST_GUARD is set and AVGKEEPER_SCHED_BIN_DIR names no absolute stub directory)\n' };
+
+export function schedBinary(name, env = process.env) {
+  if (env.AVGKEEPER_TEST_GUARD !== '1') return name;
+  const dir = env.AVGKEEPER_SCHED_BIN_DIR;
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
+  return path.join(dir, name);
+}
+
+function runSched(name, args, opts) {
+  const file = schedBinary(name);
+  if (file === null) return Promise.resolve({ ...GUARD_REFUSAL });
+  return runChild(file, args, opts);
+}
+
+// The same guard for files. Under the marker, realSched's writeFile and removeFile refuse any path under the real user's
+// home directory (from the account database, os.userInfo(), never $HOME: a test may point HOME at a temp folder, and
+// that is exactly the folder it is allowed to use). A refusal is a thrown Error that install and stop already turn into
+// a FAIL line, and nothing on disk is touched. Reading is not refused: it changes nothing.
+const nearestRealPath = (p) => {
+  let rest = '';
+  for (let cur = path.resolve(p); ; cur = path.dirname(cur)) {
+    try {
+      return path.join(fs.realpathSync(cur), rest);
+    } catch {
+      if (path.dirname(cur) === cur) return path.resolve(p);
+      rest = path.join(path.basename(cur), rest);
+    }
+  }
+};
+const inside = (dir, p) => {
+  const rel = path.relative(dir, p);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
+export function fileRefusal(p, env = process.env) {
+  if (env.AVGKEEPER_TEST_GUARD !== '1') return null;
+  let home = null;
+  try { home = os.userInfo().homedir; } catch { /* treated as unknown below */ }
+  // Home unknown means nothing can be proven safe, so nothing under the guard is allowed.
+  if (!home) return `a test tried to change ${p}, and the real home directory could not be determined (AVGKEEPER_TEST_GUARD is set)`;
+  let homeReal = home;
+  try { homeReal = fs.realpathSync(home); } catch { /* the plain path still counts */ }
+  const target = nearestRealPath(p);
+  if ([home, homeReal].some((h) => inside(h, path.resolve(p)) || inside(h, target))) {
+    return `a test tried to change ${p}, which is under the real home directory (AVGKEEPER_TEST_GUARD is set)`;
+  }
+  return null;
+}
+
+export function realSched() {
+  return {
+    uid: typeof process.getuid === 'function' ? process.getuid() : null,
+    crontabRead: () => runSched('crontab', ['-l'], { timeoutMs: SCHED_TIMEOUT_MS }),
+    crontabWrite: (input) => runSched('crontab', ['-'], { input, timeoutMs: SCHED_TIMEOUT_MS }),
+    launchctl: (args) => runSched('launchctl', args, { timeoutMs: SCHED_TIMEOUT_MS }),
+    writeFile: (p, content) => {
+      const refusal = fileRefusal(p);
+      if (refusal) throw new Error(refusal);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, content);
+    },
+    readFile: (p) => {
+      try {
+        return fs.readFileSync(p, 'utf8');
+      } catch (e) {
+        if (e.code === 'ENOENT') return null;
+        throw e;
+      }
+    },
+    removeFile: (p) => {
+      const refusal = fileRefusal(p);
+      if (refusal) throw new Error(refusal);
+      try {
+        fs.unlinkSync(p);
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
+    },
+  };
+}
+
+function schedOf(ctx) {
+  if (!ctx.sched) throw new Error('internal: ctx.sched is not wired, so the schedule cannot be installed, read or removed');
+  return ctx.sched;
+}
+
+// "every hour at :05" or "every day at 10:00": a daily-clock plan fires every day and buys only on its buy days.
+export function scheduleWhen(plan) {
+  const cadence = parseCadence(plan.cadence);
+  return cadence && cadence.kind === 'hour' ? `every hour at ${plan.at}` : `every day at ${plan.at}`;
+}
+
+// The one sentence the receipt and doctor both use for what the installed entry does (rule 3, one fact one reader):
+// the entry wakes AvgKeeper on its clock, and a plan with a longer cadence buys only on its own buy days. A plain
+// daily plan buys every time it wakes, so it gets no such clause.
+export function scheduleWakes(plan) {
+  const cadence = parseCadence(plan.cadence);
+  const everyWake = cadence && (cadence.kind === 'hour' || cadence.kind === 'day');
+  return `AvgKeeper wakes ${scheduleWhen(plan)} machine time${everyWake ? '' : " and buys only on the plan's buy days"}`;
+}
+// The scheduler named in words a non-technical user can follow, the one phrase for receipt and doctor.
+export const viaPhrase = (via) => (via === 'launchd' ? "launchd, macOS's own scheduler" : 'crontab, the system scheduler');
+
+export const cronMarker = (o) => `# avgkeeper ${o.profile} ${o.demo ? 'demo' : 'live'} (do not edit; AvgKeeper manages this line)`;
+const MARKER_PREFIX = /^# avgkeeper (\S+) (live|demo) \(do not edit; AvgKeeper manages this line\)$/;
+
+// A crontab line that runs `avgkeeper.mjs buy` for exactly this profile and mode, marked or pasted by hand.
+function isBuyEntryFor(line, o) {
+  if (line.trimStart().startsWith('#')) return false;
+  // The script's basename must be exactly avgkeeper.mjs: start of line, a space, a quote or a slash before it, so
+  // /x/myavgkeeper.mjs is another program's and never ours to touch.
+  const m = /(?:^|[\s'"/])avgkeeper\.mjs['"]?\s+buy(\s.*)?$/.exec(line);
+  if (!m) return false;
+  const words = (m[1] || '').split(/\s+/).filter(Boolean);
+  const at = words.indexOf('--profile');
+  if (at < 0 || words[at + 1] !== o.profile) return false;
+  return words.includes('--demo') === Boolean(o.demo);
+}
+
+// Pure: the crontab text with every AvgKeeper entry for this profile and mode taken out, every other line kept byte
+// for byte. Only AvgKeeper's own marker line for this profile and mode goes with the entry under it; any other comment,
+// including a hand-written `# AvgKeeper` one above a pasted entry, is the user's and stays. removed counts the entries taken out.
+export function withoutEntries(text, o) {
+  const src = String(text).split('\n');
+  if (src[src.length - 1] === '') src.pop();
+  const out = [];
+  let removed = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    const line = src[i];
+    const marker = MARKER_PREFIX.exec(line);
+    if (marker && marker[1] === o.profile && (marker[2] === 'demo') === Boolean(o.demo)) {
+      removed += 1;
+      if (i + 1 < src.length && isBuyEntryFor(src[i + 1], o)) i += 1;
+      continue;
+    }
+    if (isBuyEntryFor(line, o)) {
+      removed += 1;
+      continue;
+    }
+    out.push(line);
+  }
+  return { lines: out, removed };
+}
+
+const NO_CRONTAB = /no crontab/i;
+const UNSAFE_CRONTAB = 'your crontab contains characters AvgKeeper cannot read back safely, so it did not change it';
+const why = (r) => (r.timedOut ? 'it did not finish in time' : lastLine(r));
+
+// The user's crontab as text, '' when there is none, or { error } when it cannot be read. Never guesses: an unreadable
+// crontab is never treated as empty, because writing back from that would erase the user's own lines.
+async function readCrontab(sched) {
+  const r = await sched.crontabRead();
+  if (r.code === 0) {
+    const text = String(r.stdout || '');
+    // runChild decodes as UTF-8, and bytes that are not valid UTF-8 (a Latin-1 comment) come back as U+FFFD. Writing
+    // that text back would replace the user's own bytes with the replacement character, so it is unreadable.
+    if (text.includes(String.fromCharCode(0xFFFD))) return { error: UNSAFE_CRONTAB };
+    return { text };
+  }
+  if (r.code === 1 && NO_CRONTAB.test(`${r.stderr || ''}${r.stdout || ''}`)) return { text: '' };
+  return { error: `crontab -l exited ${r.code === null ? 'without a code' : r.code}: ${why(r)}` };
+}
+
+async function writeCrontab(sched, lines) {
+  const body = lines.length ? `${lines.join('\n')}\n` : '';
+  const r = await sched.crontabWrite(body);
+  if (r.code !== 0) return { error: `crontab write exited ${r.code === null ? 'without a code' : r.code}: ${why(r)}` };
+  return {};
+}
+
+// Drops this profile and mode's crontab entries (keeping everything else) and returns how many were removed.
+async function dropCrontabEntries(sched, o) {
+  const read = await readCrontab(sched);
+  if (read.error) return { readError: read.error };
+  const { lines, removed } = withoutEntries(read.text, o);
+  if (!removed) return { removed: 0 };
+  const w = await writeCrontab(sched, lines);
+  return w.error ? { error: w.error } : { removed };
+}
+
+// What `launchctl print gui/<uid>/<label>` said: 'loaded' (exit 0), 'notloaded' (launchd says it has no such service:
+// exit 113 or "Could not find service"), or 'unknown' for everything else (a timeout, exit 126, any other code). Only
+// the first two are facts; unknown is never read as either (rule 2, never state a cause the code did not check).
+export function printClass(r) {
+  if (r.timedOut) return 'unknown';
+  if (r.code === 0) return 'loaded';
+  if (r.code === 113 || /could not find service/i.test(String(r.stderr || ''))) return 'notloaded';
+  return 'unknown';
+}
+const printWhy = (r) => `launchctl print exited ${r.code === null ? 'without a code' : r.code}: ${why(r)}`;
+
+// After a failed macOS install: boot the job out (errors ignored, the job may never have loaded), delete the plist so
+// nothing loads at next login, then look instead of assuming. Returns null when the plist is gone and launchd
+// confirms no such job, else where an entry may be left.
+async function cleanupLaunchd(sched, l, domain) {
+  try { await sched.launchctl(['bootout', `${domain}/${l.label}`]); } catch { /* the checks below decide */ }
+  try { sched.removeFile(l.plistPath); } catch { /* the checks below decide */ }
+  let fileLeft;
+  try { fileLeft = sched.readFile(l.plistPath) !== null; } catch { fileLeft = true; }
+  let loaded;
+  try { loaded = printClass(await sched.launchctl(['print', `${domain}/${l.label}`])); } catch { loaded = 'unknown'; }
+  return fileLeft || loaded !== 'notloaded' ? `launchd (plist ${l.plistPath}, job ${l.label})` : null;
+}
+
+// Installs this plan's schedule entry. Returns { ok: true, via, when, wakes, logPath, warnings, risks } or { ok: false, reason, left, mayRemain, warnings }.
+// mayRemain is set when the failure came before anything of an earlier entry was touched and the code either saw that
+// entry (a matching crontab line) or could not look: an earlier AvgKeeper entry may still run this plan.
+// left is set only when the install failed AND taking its own partial work back failed too: where an entry may still
+// be. Never throws for an install problem: the plan is already on by the time this runs, and a failed install never
+// un-confirms it. A failed install leaves nothing behind that loads at next login or fires on its own.
+export async function installSchedule(ctx, o, plan) {
+  const call = { profile: o.profile, demo: Boolean(o.demo) };
+  const platform = ctx.platform || process.platform;
+  const env = ctx.env || {};
+  try {
+    const sched = schedOf(ctx);
+    const when = scheduleWhen(plan);
+    if (platform === 'darwin') {
+      const l = launchdConfig(env, call, plan, ctx.realHome);
+      if (l.why) return { ok: false, reason: l.why };
+      const domain = `gui/${sched.uid}`;
+      const warnings = [];
+      // A crontab line AvgKeeper wrote (or a user pasted) for this same profile and mode would fire next to the
+      // launchd job: two schedulers running one plan (the period guard stops a second buy, but the entry still
+      // fires). Taken out first. An unreadable crontab is not an error here (macOS may have none to read), but the
+      // receipt says the check was not made; a removal that fails is an error, since both would keep running.
+      const read = await readCrontab(sched);
+      if (read.error) {
+        warnings.push(`WARNING: AvgKeeper could not read your crontab (${read.error}), so it could not check it for an old AvgKeeper line. If one is there, delete it with crontab -e so two schedules do not fire.`);
+      } else {
+        const { lines, removed } = withoutEntries(read.text, call);
+        if (removed) {
+          const w = await writeCrontab(sched, lines);
+          // The crontab line was seen and is still there: it is an earlier AvgKeeper entry that keeps running.
+          if (w.error) return { ok: false, reason: `an AvgKeeper crontab entry for this profile would run next to launchd, and it could not be removed (${w.error})`, mayRemain: true, warnings };
+        }
+      }
+      const fail = async (reason) => {
+        const left = await cleanupLaunchd(sched, l, domain);
+        if (left) return { ok: false, reason, left, warnings };
+        // A crontab the code could not read may hold an earlier AvgKeeper line; it never looked, so it cannot say none.
+        return read.error ? { ok: false, reason, mayRemain: true, warnings } : { ok: false, reason, warnings };
+      };
+      try {
+        sched.writeFile(l.plistPath, `${l.plist}\n`);
+      } catch (e) {
+        return fail(String(e && e.message ? e.message : e));
+      }
+      // Not loaded yet is the ordinary first-install case, so a failed bootout is ignored; a real problem shows at bootstrap.
+      await sched.launchctl(['bootout', `${domain}/${l.label}`]);
+      const boot = await sched.launchctl(['bootstrap', domain, l.plistPath]);
+      if (boot.code !== 0) return fail(`launchctl bootstrap exited ${boot.code === null ? 'without a code' : boot.code}: ${why(boot)}`);
+      const back = await readScheduleState(ctx, call, plan);
+      if (back.state !== 'installed' || back.via !== 'launchd') return fail(`launchd did not show the job after loading it (${back.detail || back.state})`);
+      return {
+        ok: true, via: 'launchd', when, wakes: scheduleWakes(plan), logPath: l.logPath, warnings, risks: scheduleRisks(l, { platform, realHome: ctx.realHome }),
+      };
+    }
+    const cron = buySchedule(env, call, plan);
+    if (cron.why) return { ok: false, reason: cron.why };
+    const read = await readCrontab(sched);
+    // Could not look: an earlier entry may be there.
+    if (read.error) return { ok: false, reason: read.error, mayRemain: true };
+    const { lines, removed: seen } = withoutEntries(read.text, call);
+    const w = await writeCrontab(sched, [...lines, cronMarker(call), cron.line]);
+    // The write failed, so the crontab is as it was: an entry remains only if one was seen in it.
+    if (w.error) return seen ? { ok: false, reason: w.error, mayRemain: true } : { ok: false, reason: w.error };
+    const back = await readScheduleState(ctx, call, plan);
+    if (back.state !== 'installed') {
+      // The write succeeded but the crontab does not show the entry: put the crontab back without ours, so nothing
+      // half-installed stays. If even that fails, say where an entry may be.
+      const reason = `the crontab did not show the entry after writing it (${back.detail || back.state})`;
+      const undo = await writeCrontab(sched, lines);
+      return undo.error ? { ok: false, reason, left: 'your crontab' } : { ok: false, reason };
+    }
+    return {
+      ok: true, via: 'crontab', when, wakes: scheduleWakes(plan), logPath: cron.logPath, warnings: [], risks: scheduleRisks(cron, { platform, realHome: ctx.realHome }),
+    };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message ? e.message : e) };
+  }
+}
+
+// What is installed right now for this profile and mode, read only. state: 'installed' (matches this plan),
+// 'different' (an entry exists that differs from what doctor prints now), 'missing', or 'unknown' (could not be read
+// or launchd gave an answer that is neither loaded nor not found). An installed answer also carries problems, the
+// things that make it wrong even though it matches: a second AvgKeeper entry that would fire next to it.
+export async function readScheduleState(ctx, call, plan) {
+  const platform = ctx.platform || process.platform;
+  const env = ctx.env || {};
+  try {
+    const sched = schedOf(ctx);
+    if (platform === 'darwin') {
+      const l = launchdConfig(env, call, plan, ctx.realHome);
+      if (l.why) return { state: 'unknown', detail: l.why };
+      // launchd has nothing for this plan. A crontab line for this profile and mode put there by hand (AVGPLAN never
+      // writes one on macOS) still fires, so "missing" with advice to install another would be false: it is reported
+      // the way a hand-added crontab line is on Linux. An unreadable crontab changes nothing here: missing stays missing.
+      const launchdMissing = async (missing) => {
+        const cron = await readCrontab(sched);
+        if (cron.error || !withoutEntries(cron.text, call).removed) return missing;
+        const byHandLine = buySchedule(env, call, plan);
+        if (byHandLine.why) return missing;
+        const src = cron.text.split('\n');
+        if (!src.includes(byHandLine.line)) return { state: 'different', via: 'crontab' };
+        return { state: 'installed', via: 'crontab', byHand: !src.includes(cronMarker(call)), problems: [] };
+      };
+      const saved = sched.readFile(l.plistPath);
+      if (saved === null) return launchdMissing({ state: 'missing', via: 'launchd' });
+      if (saved.trimEnd() !== l.plist.trimEnd()) return { state: 'different', via: 'launchd' };
+      const p = await sched.launchctl(['print', `gui/${sched.uid}/${l.label}`]);
+      const loaded = printClass(p);
+      if (loaded === 'unknown') return { state: 'unknown', via: 'launchd', detail: `the plist is saved, but launchd could not say whether it is loaded (${printWhy(p)})` };
+      if (loaded === 'notloaded') return launchdMissing({ state: 'missing', via: 'launchd', detail: 'the plist is saved but launchd has not loaded it' });
+      // A crontab entry for the same profile and mode fires next to the launchd job. An unreadable crontab says nothing either way.
+      const problems = [];
+      const cron = await readCrontab(sched);
+      if (!cron.error) {
+        const extra = withoutEntries(cron.text, call).removed;
+        if (extra) problems.push(`your crontab also holds ${extra === 1 ? 'an AvgKeeper buy line' : `${extra} AvgKeeper buy lines`} for this profile, so a second scheduler runs this plan next to launchd. Make the plan again with AVGPLAN, which takes ${extra === 1 ? 'it' : 'them'} out, or delete ${extra === 1 ? 'it' : 'them'} yourself with crontab -e (the "# avgkeeper" comment and the line under it).`);
+      }
+      return { state: 'installed', via: 'launchd', problems };
+    }
+    const cron = buySchedule(env, call, plan);
+    if (cron.why) return { state: 'unknown', detail: cron.why };
+    const read = await readCrontab(sched);
+    if (read.error) return { state: 'unknown', detail: read.error };
+    const src = read.text.split('\n');
+    const entries = withoutEntries(read.text, call).removed;
+    // The exact line of this plan reads as installed even with no marker above it (a line pasted by hand).
+    if (src.includes(cron.line)) {
+      const problems = entries > 1 ? [`your crontab holds ${entries} AvgKeeper buy lines for this profile, so the buy is scheduled ${entries} times. Make the plan again with AVGPLAN, which replaces them with one.`] : [];
+      return {
+        state: 'installed', via: 'crontab', byHand: !src.includes(cronMarker(call)), problems,
+      };
+    }
+    if (entries) return { state: 'different', via: 'crontab' };
+    return { state: 'missing', via: 'crontab' };
+  } catch (e) {
+    return { state: 'unknown', detail: String(e && e.message ? e.message : e) };
+  }
+}
+
+// Whether any AvgKeeper entry for this profile and mode is installed, with no plan needed (doctor has none once a plan
+// is stopped). Read only. state: 'found', 'none' or 'unknown'. 'none' only when every place checked answered: on
+// macOS the plist file and launchd's own answer, everywhere the crontab. plistSaved: the macOS plist file exists.
+export async function readEntryPresence(ctx, call) {
+  const platform = ctx.platform || process.platform;
+  try {
+    const sched = schedOf(ctx);
+    let found = false;
+    let detail = null;
+    let plistSaved = false;
+    if (platform === 'darwin') {
+      plistSaved = sched.readFile(launchdPlistPath(call, ctx.realHome)) !== null;
+      const p = await sched.launchctl(['print', `gui/${sched.uid}/${launchdLabel(call)}`]);
+      const loaded = printClass(p);
+      if (plistSaved || loaded === 'loaded') found = true;
+      else if (loaded === 'unknown') detail = printWhy(p);
+    }
+    const cron = await readCrontab(sched);
+    if (cron.error) detail = detail || cron.error;
+    else if (withoutEntries(cron.text, call).removed) found = true;
+    if (found) return { state: 'found', plistSaved };
+    return detail ? { state: 'unknown', detail, plistSaved } : { state: 'none', plistSaved };
+  } catch (e) {
+    return { state: 'unknown', detail: String(e && e.message ? e.message : e), plistSaved: false };
+  }
+}
+
+// Takes this profile and mode's schedule entry out. Returns { ok: true, removed: <how many places> } or
+// { ok: false, reason }. Only AvgKeeper's own entry for this profile and mode; every other crontab line stays.
+export async function removeSchedule(ctx, o) {
+  const call = { profile: o.profile, demo: Boolean(o.demo) };
+  const platform = ctx.platform || process.platform;
+  try {
+    const sched = schedOf(ctx);
+    let removed = 0;
+    if (platform === 'darwin') {
+      const plistPath = launchdPlistPath(call, ctx.realHome);
+      const had = sched.readFile(plistPath) !== null;
+      const domain = `gui/${sched.uid}`;
+      const bootout = await sched.launchctl(['bootout', `${domain}/${launchdLabel(call)}`]);
+      // A bootout that failed for any reason other than "not loaded" leaves the job running; asking launchd settles
+      // it. Only "loaded" and "not found" are answers: a timeout or any other exit is unknown, and stop never says
+      // the schedule is removed on a guess.
+      const still = await sched.launchctl(['print', `${domain}/${launchdLabel(call)}`]);
+      const loaded = printClass(still);
+      if (loaded === 'loaded') return { ok: false, reason: `launchd still has the job loaded after bootout (${why(still)})` };
+      if (loaded === 'unknown') return { ok: false, reason: `launchd could not say whether the job is still loaded after bootout (${printWhy(still)})` };
+      if (had) sched.removeFile(plistPath);
+      // A bootout that exited 0 took a loaded job out, which is a removal even when no plist file was on disk.
+      if (had || bootout.code === 0) removed += 1;
+      // A crontab entry is taken out too. An unreadable crontab is not "nothing there": an entry could be in it.
+      const c = await dropCrontabEntries(sched, call);
+      const done = removed ? 'the launchd job was taken out, but ' : '';
+      if (c.readError) return { ok: false, reason: `${done}the crontab could not be read to look for an AvgKeeper line (${c.readError})` };
+      if (c.error) return { ok: false, reason: `${done}${c.error}` };
+      return { ok: true, removed: removed + (c.removed || 0) };
+    }
+    const c = await dropCrontabEntries(sched, call);
+    if (c.readError) return { ok: false, reason: c.readError };
+    if (c.error) return { ok: false, reason: c.error };
+    return { ok: true, removed: c.removed };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message ? e.message : e) };
+  }
 }

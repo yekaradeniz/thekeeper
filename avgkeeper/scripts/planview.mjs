@@ -196,7 +196,7 @@ export function waitingLine(ledger, plan) {
 // the two differ, the buy can fire at a time the plan does not expect. One reader for buy, status and doctor.
 export function timeZoneWarning(plan, timeZone) {
   if (!plan || !timeZone || plan.timeZone === timeZone) return null;
-  return `WARNING: this plan was made in ${plan.timeZone}, but this Mac is now on ${timeZone}. The schedule fires at machine time, so make a new plan and run doctor again.`;
+  return `WARNING: this plan was made in ${plan.timeZone}, but this Mac is now on ${timeZone}. The schedule fires at machine time, so make a new plan with AVGPLAN, which reinstalls the schedule.`;
 }
 
 // A fact one surface knows, every surface knows (ProjectBuilder CLAUDE.md rule 4): readLedger tolerates one
