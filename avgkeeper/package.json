@@ -1,0 +1,10 @@
+{
+  "name": "avgkeeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AvgKeeper: buys your losing OKX spot coins on a schedule, re-splitting a fixed USDT budget by each day's losses.",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test --import ./tests/tmp-guard.mjs tests/*.test.mjs", "mutate": "node tools/mutate.mjs" }
+}

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>TheKeeper mark</title>
+  <!-- One line: a short dip (the buys while in loss), then the climb. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2C2C2E"/>
+      <stop offset="1" stop-color="#0A0A0B"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#30D158"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
+  <path d="M112 318 C 160 318, 186 364, 232 356 S 330 250, 396 160"
+        fill="none" stroke="url(#line)" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="396" cy="160" r="26" fill="#30D158"/>
+</svg>
